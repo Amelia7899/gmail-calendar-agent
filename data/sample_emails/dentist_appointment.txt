@@ -1,0 +1,7 @@
+Subject: Dentist appointment Friday
+From: clinic@example.com
+
+Hello,
+
+This is a reminder for your dentist appointment on Friday at 10:30am at Smile Clinic.
+Please arrive ten minutes early.
