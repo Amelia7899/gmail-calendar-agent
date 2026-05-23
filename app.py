@@ -1,20 +1,12 @@
 from pathlib import Path
-import re
 
 import streamlit as st
+
+from agent.event_extractor import extract_events_from_emails
 
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_EMAIL_DIR = BASE_DIR / "data" / "sample_emails"
-EVENT_WORDS = (
-    "meeting",
-    "appointment",
-    "deadline",
-    "event",
-    "interview",
-    "class",
-    "workshop",
-)
 
 
 def read_sample_emails() -> list[dict[str, str]]:
@@ -49,43 +41,6 @@ def read_sample_emails() -> list[dict[str, str]]:
     return emails
 
 
-def extract_schedule_items(emails: list[dict[str, str]]) -> list[dict[str, str]]:
-    items = []
-
-    for email in emails:
-        text = f"{email['subject']}\n{email['body']}"
-        lower_text = text.lower()
-
-        if not any(word in lower_text for word in EVENT_WORDS):
-            continue
-
-        date_match = re.search(
-            r"\b(?:tomorrow|today|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-            r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-            r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-            r"\s+\d{1,2})\b",
-            text,
-            re.IGNORECASE,
-        )
-        time_match = re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", text, re.IGNORECASE)
-        location_match = re.search(
-            r"\b(?:in|at)\s+([A-Z][A-Za-z0-9 ]+(?:Room|Clinic|Center|Hall|Office|online)?\d*)",
-            text,
-        )
-
-        items.append(
-            {
-                "title": email["subject"],
-                "date": date_match.group(0) if date_match else "Needs review",
-                "time": time_match.group(0) if time_match else "Needs review",
-                "location": location_match.group(1).strip() if location_match else "Needs review",
-                "source_email": email["source"],
-            }
-        )
-
-    return items
-
-
 st.set_page_config(page_title="Gmail Calendar Agent Demo")
 
 st.title("Gmail Calendar Agent Demo")
@@ -105,7 +60,7 @@ else:
 st.divider()
 
 if st.button("Scan sample emails", type="primary"):
-    st.session_state["schedule_items"] = extract_schedule_items(emails)
+    st.session_state["schedule_items"] = extract_events_from_emails(emails)
 
 st.subheader("Extracted schedule")
 
