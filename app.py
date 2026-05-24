@@ -3,6 +3,11 @@ from pathlib import Path
 import streamlit as st
 
 from agent.event_extractor import extract_events_from_emails
+from agent.gmail_reader import (
+    DEFAULT_CREDENTIALS_PATH,
+    GmailReaderError,
+    read_recent_emails,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -46,10 +51,11 @@ def read_sample_emails() -> list[dict[str, str]]:
     return emails
 
 
-def scan_sample_emails(emails: list[dict[str, str]]) -> None:
+def scan_emails(emails: list[dict[str, str]], source_label: str) -> None:
     schedule_items = extract_events_from_emails(emails)
     st.session_state["schedule_items"] = schedule_items
     st.session_state["event_decisions"] = ["pending"] * len(schedule_items)
+    st.session_state["schedule_source"] = source_label
 
 
 def mark_event(index: int, decision: str) -> None:
@@ -112,29 +118,69 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
 st.set_page_config(page_title="Gmail Calendar Agent Demo")
 
 st.title("Gmail Calendar Agent Demo")
-st.caption("Sample email prototype")
+st.caption("Scan sample emails or connect Gmail, then review events before confirming.")
 
-emails = read_sample_emails()
+source_mode = st.radio(
+    "Email source",
+    ("Sample emails", "Gmail"),
+    horizontal=True,
+)
 
-st.subheader("Sample emails")
+if source_mode == "Sample emails":
+    emails = read_sample_emails()
 
-if not emails:
-    st.info("No sample emails found.")
+    st.subheader("Sample emails")
+
+    if not emails:
+        st.info("No sample emails found.")
+    else:
+        for email in emails:
+            with st.expander(email["subject"], expanded=True):
+                st.write(email["body"])
+
+    st.divider()
+
+    if st.button("Scan sample emails", type="primary"):
+        scan_emails(emails, "Sample emails")
 else:
-    for email in emails:
-        with st.expander(email["subject"], expanded=True):
-            st.write(email["body"])
+    st.subheader("Gmail inbox")
+
+    if not DEFAULT_CREDENTIALS_PATH.exists():
+        st.warning(
+            "Place credentials.json in the project folder before scanning Gmail."
+        )
+
+    max_results = st.slider("Recent emails to read", min_value=10, max_value=20, value=10)
+
+    if st.button("Connect and scan Gmail", type="primary"):
+        try:
+            with st.spinner("Reading recent Gmail messages..."):
+                gmail_emails = read_recent_emails(max_results=max_results)
+
+            st.session_state["gmail_emails"] = gmail_emails
+            scan_emails(gmail_emails, "Gmail")
+            st.success(f"Read {len(gmail_emails)} Gmail messages.")
+        except GmailReaderError as exc:
+            st.error(str(exc))
+
+    gmail_emails = st.session_state.get("gmail_emails", [])
+
+    if gmail_emails:
+        for email in gmail_emails:
+            with st.expander(email["subject"]):
+                st.caption(
+                    f"{email.get('sender', 'Unknown sender')} | "
+                    f"{email.get('date', 'Unknown date')} | "
+                    f"ID: {email.get('message_id', '')}"
+                )
+                st.write(email.get("body", ""))
+    else:
+        st.write("Connect Gmail to show recent messages here.")
 
 st.divider()
 
-st.button(
-    "Scan sample emails",
-    type="primary",
-    on_click=scan_sample_emails,
-    args=(emails,),
-)
-
 st.subheader("Schedule preview")
+st.caption(f"Current source: {st.session_state.get('schedule_source', 'Not scanned yet')}")
 
 schedule_items = st.session_state.get("schedule_items", [])
 event_decisions = st.session_state.get("event_decisions", [])
@@ -169,4 +215,4 @@ if schedule_items:
     for index, event in enumerate(schedule_items):
         preview_event(event, index, event_decisions[index])
 else:
-    st.write("Click the scan button to preview possible calendar events.")
+    st.write("Click a scan button to preview possible calendar events.")
