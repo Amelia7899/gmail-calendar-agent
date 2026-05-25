@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 credentials.json
 token.json
+.gmail_oauth_state.json

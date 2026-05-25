@@ -136,7 +136,10 @@ def handle_gmail_callback() -> None:
 
     state = st.session_state.get("gmail_oauth_state") or params.get("state")
     if not state:
-        st.error("Gmail login returned without a state value. Start the login again.")
+        st.session_state["gmail_login_error"] = (
+            "Gmail login returned without a state value. Start the login again."
+        )
+        st.query_params.clear()
         return
 
     try:
@@ -146,7 +149,8 @@ def handle_gmail_callback() -> None:
             redirect_uri=GMAIL_REDIRECT_URI,
         )
     except GmailReaderError as exc:
-        st.error(str(exc))
+        st.session_state["gmail_login_error"] = str(exc)
+        st.query_params.clear()
         return
 
     st.session_state.pop("gmail_auth_url", None)
@@ -191,6 +195,9 @@ st.caption("Scan sample emails or connect Gmail, then review events before confi
 
 if st.session_state.pop("gmail_login_success", False):
     st.success("Gmail login saved. You can scan Gmail now.")
+
+if st.session_state.pop("gmail_login_error", None):
+    st.error("Gmail login failed. Create a new login link and try again.")
 
 source_mode = st.radio(
     "Email source",

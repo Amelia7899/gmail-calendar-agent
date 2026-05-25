@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import html as html_lib
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CREDENTIALS_PATH = PROJECT_ROOT / "credentials.json"
 DEFAULT_TOKEN_PATH = PROJECT_ROOT / "token.json"
+DEFAULT_OAUTH_STATE_PATH = PROJECT_ROOT / ".gmail_oauth_state.json"
 
 
 class GmailReaderError(RuntimeError):
@@ -72,11 +74,13 @@ def create_authorization_url(
 
     flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
     flow.redirect_uri = redirect_uri
-    return flow.authorization_url(
+    auth_url, state = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
     )
+    _save_oauth_code_verifier(state, flow.code_verifier)
+    return auth_url, state
 
 
 def save_token_from_callback(
@@ -85,12 +89,22 @@ def save_token_from_callback(
     redirect_uri: str,
     credentials_path: Path | str = DEFAULT_CREDENTIALS_PATH,
     token_path: Path | str = DEFAULT_TOKEN_PATH,
+    oauth_state_path: Path | str = DEFAULT_OAUTH_STATE_PATH,
 ) -> None:
     _, _, InstalledAppFlow, _ = _load_google_libraries()
+    code_verifier = _load_oauth_code_verifier(state, oauth_state_path)
+
+    if not code_verifier:
+        raise GmailSetupError(
+            "Gmail login expired. Click Create Gmail login link and try again."
+        )
+
     flow = InstalledAppFlow.from_client_secrets_file(
         str(credentials_path),
         SCOPES,
         state=state,
+        code_verifier=code_verifier,
+        autogenerate_code_verifier=False,
     )
     flow.redirect_uri = redirect_uri
 
@@ -102,6 +116,7 @@ def save_token_from_callback(
         raise GmailSetupError(f"Gmail login failed: {exc}") from exc
 
     Path(token_path).write_text(flow.credentials.to_json(), encoding="utf-8")
+    _delete_oauth_code_verifier(state, oauth_state_path)
 
 
 def build_gmail_service(
@@ -175,6 +190,60 @@ def _load_google_libraries() -> tuple[Any, Any, Any, Any]:
         ) from exc
 
     return Request, Credentials, InstalledAppFlow, build
+
+
+def _save_oauth_code_verifier(
+    state: str,
+    code_verifier: str | None,
+    oauth_state_path: Path | str = DEFAULT_OAUTH_STATE_PATH,
+) -> None:
+    if not code_verifier:
+        raise GmailSetupError("Gmail login setup failed. Try creating the login link again.")
+
+    oauth_state_path = Path(oauth_state_path)
+    state_data = _read_oauth_state_file(oauth_state_path)
+    state_data[state] = code_verifier
+    oauth_state_path.write_text(json.dumps(state_data), encoding="utf-8")
+
+
+def _load_oauth_code_verifier(
+    state: str,
+    oauth_state_path: Path | str = DEFAULT_OAUTH_STATE_PATH,
+) -> str | None:
+    return _read_oauth_state_file(Path(oauth_state_path)).get(state)
+
+
+def _delete_oauth_code_verifier(
+    state: str,
+    oauth_state_path: Path | str = DEFAULT_OAUTH_STATE_PATH,
+) -> None:
+    oauth_state_path = Path(oauth_state_path)
+    state_data = _read_oauth_state_file(oauth_state_path)
+    state_data.pop(state, None)
+
+    if state_data:
+        oauth_state_path.write_text(json.dumps(state_data), encoding="utf-8")
+    elif oauth_state_path.exists():
+        oauth_state_path.unlink()
+
+
+def _read_oauth_state_file(oauth_state_path: Path) -> dict[str, str]:
+    if not oauth_state_path.exists():
+        return {}
+
+    try:
+        data = json.loads(oauth_state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    return {
+        str(state): str(code_verifier)
+        for state, code_verifier in data.items()
+        if state and code_verifier
+    }
 
 
 def _headers_by_name(headers: list[dict[str, str]]) -> dict[str, str]:
