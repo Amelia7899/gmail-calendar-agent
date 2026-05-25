@@ -20,9 +20,12 @@ The app uses read-only Gmail access.
 4. Create an OAuth Client ID and choose Desktop App.
 5. Download the file and rename it to `credentials.json`.
 6. Put `credentials.json` in this project folder, next to `app.py`.
-7. Run the app, choose `Gmail`, then click `Connect and scan Gmail`.
+7. Run the app and choose `Gmail`.
+8. Click `Create Gmail login link`, then click `Open Google login`.
+9. Allow Gmail read-only access. Google will return to the local app.
+10. Click `Connect and scan Gmail`.
 
-On the first Gmail scan, Google opens a browser login page. After approval, the app saves `token.json` locally so the next run can reuse the login.
+After approval, the app saves `token.json` locally so the next run can reuse the login.
 
 `credentials.json` and `token.json` are ignored by Git and should not be uploaded to GitHub.
 

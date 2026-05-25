@@ -53,6 +53,57 @@ def read_recent_emails(
     return emails
 
 
+def token_exists(token_path: Path | str = DEFAULT_TOKEN_PATH) -> bool:
+    return Path(token_path).exists()
+
+
+def create_authorization_url(
+    redirect_uri: str,
+    credentials_path: Path | str = DEFAULT_CREDENTIALS_PATH,
+) -> tuple[str, str]:
+    _, _, InstalledAppFlow, _ = _load_google_libraries()
+    credentials_path = Path(credentials_path)
+
+    if not credentials_path.exists():
+        raise GmailSetupError(
+            f"Missing {credentials_path.name}. Download it from Google Cloud "
+            f"Console and place it in {credentials_path.parent}."
+        )
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    flow.redirect_uri = redirect_uri
+    return flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+
+
+def save_token_from_callback(
+    authorization_response: str,
+    state: str,
+    redirect_uri: str,
+    credentials_path: Path | str = DEFAULT_CREDENTIALS_PATH,
+    token_path: Path | str = DEFAULT_TOKEN_PATH,
+) -> None:
+    _, _, InstalledAppFlow, _ = _load_google_libraries()
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(credentials_path),
+        SCOPES,
+        state=state,
+    )
+    flow.redirect_uri = redirect_uri
+
+    # OAuthlib requires HTTPS, but Google allows HTTP loopback redirects.
+    oauthlib_response = authorization_response.replace("http://", "https://", 1)
+    try:
+        flow.fetch_token(authorization_response=oauthlib_response)
+    except Exception as exc:
+        raise GmailSetupError(f"Gmail login failed: {exc}") from exc
+
+    Path(token_path).write_text(flow.credentials.to_json(), encoding="utf-8")
+
+
 def build_gmail_service(
     credentials_path: Path | str = DEFAULT_CREDENTIALS_PATH,
     token_path: Path | str = DEFAULT_TOKEN_PATH,

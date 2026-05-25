@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlencode
 
 import streamlit as st
 
@@ -6,12 +7,16 @@ from agent.event_extractor import extract_events_from_emails
 from agent.gmail_reader import (
     DEFAULT_CREDENTIALS_PATH,
     GmailReaderError,
+    create_authorization_url,
     read_recent_emails,
+    save_token_from_callback,
+    token_exists,
 )
 
 
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_EMAIL_DIR = BASE_DIR / "data" / "sample_emails"
+GMAIL_REDIRECT_URI = "http://localhost:8501/"
 DECISION_LABELS = {
     "pending": "Pending review",
     "confirmed": "Confirmed",
@@ -115,10 +120,77 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
         )
 
 
+def build_current_url() -> str:
+    params = dict(st.query_params)
+    if not params:
+        return GMAIL_REDIRECT_URI
+
+    return f"{GMAIL_REDIRECT_URI}?{urlencode(params, doseq=True)}"
+
+
+def handle_gmail_callback() -> None:
+    params = dict(st.query_params)
+
+    if "code" not in params:
+        return
+
+    state = st.session_state.get("gmail_oauth_state") or params.get("state")
+    if not state:
+        st.error("Gmail login returned without a state value. Start the login again.")
+        return
+
+    try:
+        save_token_from_callback(
+            authorization_response=build_current_url(),
+            state=state,
+            redirect_uri=GMAIL_REDIRECT_URI,
+        )
+    except GmailReaderError as exc:
+        st.error(str(exc))
+        return
+
+    st.session_state.pop("gmail_auth_url", None)
+    st.session_state.pop("gmail_oauth_state", None)
+    st.session_state["gmail_login_success"] = True
+    st.query_params.clear()
+
+
+def show_gmail_login_controls() -> None:
+    if not DEFAULT_CREDENTIALS_PATH.exists():
+        st.warning(
+            "Place credentials.json in the project folder before scanning Gmail."
+        )
+        return
+
+    st.info("First connect Gmail, then scan recent messages.")
+
+    if st.button("Create Gmail login link"):
+        try:
+            auth_url, state = create_authorization_url(GMAIL_REDIRECT_URI)
+        except GmailReaderError as exc:
+            st.error(str(exc))
+            return
+
+        st.session_state["gmail_auth_url"] = auth_url
+        st.session_state["gmail_oauth_state"] = state
+
+    auth_url = st.session_state.get("gmail_auth_url")
+    if auth_url:
+        st.link_button("Open Google login", auth_url)
+        st.caption(
+            "After allowing access, Google will return to this page. "
+            "Then click Connect and scan Gmail."
+        )
+
+
 st.set_page_config(page_title="Gmail Calendar Agent Demo")
+handle_gmail_callback()
 
 st.title("Gmail Calendar Agent Demo")
 st.caption("Scan sample emails or connect Gmail, then review events before confirming.")
+
+if st.session_state.pop("gmail_login_success", False):
+    st.success("Gmail login saved. You can scan Gmail now.")
 
 source_mode = st.radio(
     "Email source",
@@ -145,14 +217,12 @@ if source_mode == "Sample emails":
 else:
     st.subheader("Gmail inbox")
 
-    if not DEFAULT_CREDENTIALS_PATH.exists():
-        st.warning(
-            "Place credentials.json in the project folder before scanning Gmail."
-        )
+    if not token_exists():
+        show_gmail_login_controls()
 
     max_results = st.slider("Recent emails to read", min_value=10, max_value=20, value=10)
 
-    if st.button("Connect and scan Gmail", type="primary"):
+    if st.button("Connect and scan Gmail", type="primary", disabled=not token_exists()):
         try:
             with st.spinner("Reading recent Gmail messages..."):
                 gmail_emails = read_recent_emails(max_results=max_results)
