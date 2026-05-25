@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import html
 import json
 import os
-import html
 import re
 from urllib import error, request
 
@@ -145,7 +145,10 @@ ADDRESS_PATTERN = re.compile(
 
 def is_event_related(text: str) -> bool:
     lower_text = text.lower()
-    return any(keyword in lower_text for keyword in EVENT_KEYWORDS)
+    if any(keyword in lower_text for keyword in EVENT_KEYWORDS):
+        return True
+
+    return has_scheduled_datetime(text)
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -156,11 +159,17 @@ LAST_EXTRACTION_STATUS = {
 }
 
 
-def extract_events_from_emails(emails: list[dict[str, str]]) -> list[dict[str, str]]:
-    llm_events = extract_events_with_llm_if_available(emails)
-    if llm_events is not None:
-        return llm_events
+def extract_events_from_emails(
+    emails: list[dict[str, str]],
+    use_llm: bool = False,
+) -> list[dict[str, str]]:
+    if use_llm:
+        llm_events = extract_events_with_llm_if_available(emails)
+        if llm_events is not None:
+            return llm_events
 
+    if not use_llm:
+        set_extractor_status("Rules", "Rule-based extraction is active.")
     events = []
 
     for email in emails:
@@ -236,10 +245,7 @@ def extract_events_from_email_with_llm(
     payload = {
         "model": model,
         "input": [
-            {
-                "role": "system",
-                "content": build_llm_system_prompt(),
-            },
+            {"role": "system", "content": build_llm_system_prompt()},
             {
                 "role": "user",
                 "content": (
@@ -315,34 +321,13 @@ def extract_events_from_email_with_llm(
 
 def build_llm_system_prompt() -> str:
     return (
-        "You are an email-to-calendar extraction engine. Extract all real calendar "
-        "events from the email and return JSON that matches the schema.\n\n"
-        "Event splitting rules:\n"
-        "- Do not summarize a schedule as one event. If an email lists multiple "
-        "date/time/location rows, return one event for each row.\n"
-        "- If one date heading applies to several rooms, sessions, venues, or groups, "
-        "create one event per room/session/venue/group using the inherited date and time.\n"
-        "- If two rooms happen at the same date/time, they are still two separate events "
-        "because the locations differ.\n"
-        "- If one event has a time range like '3-5pm', output '15:00-17:00'. If it says "
-        "'2-3pm', output '14:00-15:00'. Always use 24-hour time.\n"
-        "- Dates must be YYYY-MM-DD. Infer missing years from the current date.\n\n"
-        "Filtering rules:\n"
-        "- Return no events for discussion digests, forum questions, preference links, "
-        "email footers, Canvas/Edstem notification boilerplate, or questions like "
-        "'When will A4 release?' unless a concrete scheduled date is actually stated.\n"
-        "- A word such as 'time' or 'assigned' is not a calendar time by itself.\n"
-        "- Do not invent a date, time, or location. Use exactly 'Needs review' for a "
-        "missing time or missing location.\n"
-        "- Clean HTML tags such as </p> from every field.\n\n"
-        "Title rules:\n"
-        "- Make event titles specific. For schedules, include the session/room/group "
-        "when that is what distinguishes the event.\n"
-        "- Keep descriptions short but include useful context such as presenters or topic "
-        "if available.\n\n"
-        "Example: 'MONDAY 25th MAY (3-5pm) * ROOM 1: SCIENCE B303, Room 155 "
-        "* ROOM 2: 260-009 - 12 GRAFTON RD' must return two events, both dated "
-        "YYYY-05-25 with time '15:00-17:00', one for ROOM 1 and one for ROOM 2."
+        "Extract all real calendar events from the email. Return no events for digests, "
+        "questions, footers, preferences links, or general announcements without a "
+        "concrete scheduled date. If one email lists multiple Date/Time/Where blocks, "
+        "return one event per block. If one date/time has multiple rooms or venues, "
+        "return one event per room or venue. Dates must be YYYY-MM-DD. Times must be "
+        "24-hour HH:MM or HH:MM-HH:MM. Use exactly 'Needs review' for missing time or "
+        "location. Clean Markdown, links, emoji-only fragments, and HTML tags from names."
     )
 
 
@@ -386,11 +371,12 @@ def normalize_llm_events(events: list[dict], source_email: str) -> list[dict[str
             continue
 
         clean_event = {
-            "title": clean_value(strip_html(str(event.get("title", "Untitled event")))),
+            "title": clean_title(str(event.get("title", "Untitled event"))),
             "date": clean_value(str(event.get("date", "Needs review"))),
             "time": clean_value(str(event.get("time", "Needs review"))),
-            "location": clean_value(strip_html(str(event.get("location", "Needs review")))),
-            "description": clean_value(strip_html(str(event.get("description", "")))),
+            "location": clean_location_candidate(str(event.get("location", "Needs review")))
+            or "Needs review",
+            "description": clean_value(strip_markup(strip_html(str(event.get("description", ""))))),
             "source_email": clean_value(str(event.get("source_email", source_email))),
         }
 
@@ -419,7 +405,7 @@ def build_single_event(
     text: str,
 ) -> dict[str, str]:
     return {
-        "title": subject,
+        "title": clean_title(subject),
         "date": extract_date(text),
         "time": extract_time(text),
         "location": extract_location(text),
@@ -460,7 +446,7 @@ def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, 
 
             events.append(
                 {
-                    "title": title,
+                    "title": clean_title(title),
                     "date": event_date or "Needs review",
                     "time": event_time,
                     "location": location,
@@ -521,7 +507,7 @@ def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, s
         description = clean_value(strip_html(pending_prefix)) or subject
 
         event = {
-            "title": title,
+            "title": clean_title(title),
             "date": event_date or "Needs review",
             "time": event_time,
             "location": location or "Needs review",
@@ -538,10 +524,10 @@ def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, s
 
 
 def split_location_and_next_prefix(raw_location: str) -> tuple[str | None, str]:
-    value = clean_value(strip_html(raw_location))
+    value = clean_value(strip_markup(strip_html(raw_location)))
     link_tail = ""
     link_match = re.search(
-        r"\s+(?:Register here:\s*)?https?://\S+\s*(?P<tail>.*)$",
+        r"\s+(?:Register here:\s*)?(?:\[[^\]]+\]\s*\([^)]+\)|https?://\S+)\s*(?P<tail>.*)$",
         value,
         re.IGNORECASE,
     )
@@ -555,6 +541,9 @@ def split_location_and_next_prefix(raw_location: str) -> tuple[str | None, str]:
         return None, ""
 
     location_patterns = (
+        r"(?P<loc>[A-Z][A-Za-z0-9&.' -]{1,80}"
+        r"(?:Hall|Library|Atrium|Kitchen|Centre|Center|Office|Building|Lab|Theater|Theatre)"
+        r"\s*\([^)]*\))(?=\s|$|[,.;])",
         r"(?P<loc>Grafton Atrium and Sweet As Crepes will be outside the main entrance)\b",
         r"(?P<loc>Outside Grafton Atrium)\b",
         r"(?P<loc>Grafton Atrium)\b",
@@ -587,22 +576,32 @@ def parse_date_text(value: str) -> str | None:
 
 
 def infer_title_from_prefix(prefix: str, fallback_title: str) -> str:
-    text = clean_value(strip_html(prefix))
-    text = re.split(r"\b(?:What['’]?s On This Week|Next Week)\b", text, flags=re.IGNORECASE)[-1]
+    raw_text = strip_markup(strip_html(prefix))
+    raw_text = re.sub(
+        r"(?i)^register here:\s*(?:\[[^\]]+\]\s*\([^)]+\)|https?://\S+)\s*",
+        "",
+        raw_text,
+    )
+    line_candidates = [clean_value(line) for line in raw_text.splitlines() if clean_value(line)]
+    line_candidates = dedupe_adjacent_lines(line_candidates)
+    text = clean_value(raw_text)
+    section_match = re.search(r"\b(?:What['’]?s On This Week|Next Week)\b", text, re.IGNORECASE)
+    if section_match and section_match.start() < 80:
+        text = text[section_match.end() :]
+        line_candidates = [clean_value(line) for line in text.splitlines() if clean_value(line)]
     text = clean_value(text)
 
     if not text:
         return fallback_title
 
-    line_candidates = [clean_value(line) for line in text.splitlines() if clean_value(line)]
     if line_candidates:
         heading = first_heading_like_text(line_candidates)
         if heading:
-            return shorten_before_description_verb(heading)
+            return clean_title(shorten_before_description_verb(heading))
 
     sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
     shortened = shorten_before_description_verb(sentence)
-    return shortened or fallback_title
+    return clean_title(shortened or fallback_title)
 
 
 def first_heading_like_text(lines: list[str]) -> str | None:
@@ -613,9 +612,21 @@ def first_heading_like_text(lines: list[str]) -> str | None:
     return None
 
 
+def dedupe_adjacent_lines(lines: list[str]) -> list[str]:
+    deduped = []
+
+    for line in lines:
+        if not deduped or deduped[-1].lower() != line.lower():
+            deduped.append(line)
+
+    return deduped
+
+
 def shorten_before_description_verb(text: str) -> str:
     markers = (
         " is finally here",
+        " The last week ",
+        " make sure ",
         " Empower ",
         " Decorate ",
         " Join ",
@@ -624,7 +635,6 @@ def shorten_before_description_verb(text: str) -> str:
         " Treat ",
         " Need ",
         " Our much-loved ",
-        " The last week ",
     )
     for marker in markers:
         if marker in text:
@@ -775,6 +785,15 @@ def extract_location_from_unit(unit: str) -> str | None:
     class_match = re.search(r"\b(?:in|during)\s+class\b", unit, re.IGNORECASE)
     if class_match:
         return "In class"
+
+    compound_room_match = re.search(
+        r"\b([A-Z][A-Za-z0-9&.' -]{1,80}"
+        r"(?:Library|Center|Centre|Hall|Office|Building|Lab|Theater|Theatre|Atrium),\s*"
+        r"Room\s*[A-Za-z0-9-]+(?:\s*\([^)]*\))?)(?=\s|$|[,.;])",
+        unit,
+    )
+    if compound_room_match:
+        return clean_location_candidate(compound_room_match.group(1))
 
     room_match = re.search(r"\b(?:in|at)?\s*((?:Room|room)\s*[A-Za-z0-9-]+)\b", unit)
     if room_match:
@@ -956,8 +975,15 @@ def has_date_language(text: str) -> bool:
     return any(word in lower_text for word in (" on ", "date", "when", "scheduled", "due", "deadline"))
 
 
+def has_scheduled_datetime(text: str) -> bool:
+    normalized = normalize_text(text)
+    today = date.today()
+    has_date = parse_explicit_date(normalized, today) or parse_relative_date(normalized, today)
+    return bool(has_date and normalize_time_expression(normalized))
+
+
 def build_description(body: str) -> str:
-    lines = [clean_value(strip_html(line)) for line in body.splitlines()]
+    lines = [clean_value(strip_markup(strip_html(line))) for line in body.splitlines()]
     lines = [line for line in lines if line and not looks_like_footer(line)]
     return " ".join(lines) if lines else "No description"
 
@@ -980,18 +1006,43 @@ def build_schedule_description(section: str, room_label: str) -> str:
 
 
 def normalize_text(text: str) -> str:
-    text = strip_html(text)
+    text = strip_markup(strip_html(text))
     text = text.replace("\u00a0", " ")
     text = text.replace("\u2013", "-").replace("\u2014", "-")
     return "\n".join(clean_value(line) for line in text.splitlines() if clean_value(line))
 
 
 def strip_html(text: str) -> str:
+    text = re.sub(r"(?is)<!--.*?-->", " ", text)
+    text = re.sub(r"(?is)<head\b.*?</head>", " ", text)
     text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p>", "\n", text)
+    text = re.sub(
+        r"(?i)</?(?:p|div|tr|td|table|h[1-6]|li|ul|ol|section|article|body)[^>]*>",
+        "\n",
+        text,
+    )
     text = re.sub(r"<[^>]+>", " ", text)
     return html.unescape(text)
+
+
+def strip_markup(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\s*\(([^)]+)\)", r"\1", text)
+    text = re.sub(r"(\*{2,3}|_{2,3})(.*?)\1", r"\2", text)
+    text = re.sub(r"(?<!\S)[*_]{2,}\s*", "", text)
+    text = re.sub(r"\s*[*_]{2,}(?!\S)", "", text)
+    return text
+
+
+def clean_title(value: str) -> str:
+    value = clean_value(strip_markup(strip_html(value))).strip(" *_")
+    value = re.sub(r"(?i)^register here:\s*", "", value).strip()
+    value = re.sub(r"\s+", " ", value)
+
+    if not value or value.lower() in {"for the details", "for the details😊"}:
+        return "Untitled event"
+
+    return value
 
 
 def looks_like_footer(text: str) -> bool:

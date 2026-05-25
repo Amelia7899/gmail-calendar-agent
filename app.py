@@ -60,8 +60,8 @@ def read_sample_emails() -> list[dict[str, str]]:
     return emails
 
 
-def scan_emails(emails: list[dict[str, str]], source_label: str) -> None:
-    schedule_items = extract_events_from_emails(emails)
+def scan_emails(emails: list[dict[str, str]], source_label: str, use_llm: bool) -> None:
+    schedule_items = extract_events_from_emails(emails, use_llm=use_llm)
     st.session_state["schedule_items"] = schedule_items
     st.session_state["event_decisions"] = ["pending"] * len(schedule_items)
     st.session_state["schedule_source"] = source_label
@@ -200,10 +200,19 @@ handle_gmail_callback()
 st.title("Gmail Calendar Agent Demo")
 st.caption("Scan sample emails or connect Gmail, then review events before confirming.")
 
-if llm_extractor_enabled():
-    st.success("LLM event extraction is enabled.")
+extractor_mode = st.radio(
+    "Extraction method",
+    ("Rule-based", "LLM + rules fallback"),
+    horizontal=True,
+)
+use_llm = extractor_mode == "LLM + rules fallback"
+
+if use_llm and llm_extractor_enabled():
+    st.success("LLM extraction is selected. Rules will still be used as fallback.")
+elif use_llm:
+    st.warning("LLM extraction is selected, but OPENAI_API_KEY is not available. Rules will be used.")
 else:
-    st.info("Rule-based extraction is active. Set OPENAI_API_KEY to use LLM extraction.")
+    st.info("Rule-based event extraction is selected.")
 
 if st.session_state.pop("gmail_login_success", False):
     st.success("Gmail login saved. You can scan Gmail now.")
@@ -232,7 +241,7 @@ if source_mode == "Sample emails":
     st.divider()
 
     if st.button("Scan sample emails", type="primary"):
-        scan_emails(emails, "Sample emails")
+        scan_emails(emails, "Sample emails", use_llm)
         st.rerun()
 else:
     st.subheader("Gmail inbox")
@@ -248,7 +257,7 @@ else:
                 gmail_emails = read_recent_emails(max_results=max_results)
 
             st.session_state["gmail_emails"] = gmail_emails
-            scan_emails(gmail_emails, "Gmail")
+            scan_emails(gmail_emails, "Gmail", use_llm)
             st.rerun()
         except GmailReaderError as exc:
             st.error(str(exc))

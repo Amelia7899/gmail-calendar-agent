@@ -259,13 +259,13 @@ def _extract_message_body(payload: dict[str, Any]) -> str:
     html_parts: list[str] = []
 
     def visit(part: dict[str, Any]) -> None:
-        mime_type = part.get("mimeType", "")
+        mime_type = part.get("mimeType", "").lower().split(";", 1)[0]
         data = part.get("body", {}).get("data")
 
         if data:
             decoded = _decode_base64url(data)
             if mime_type == "text/plain":
-                plain_parts.append(decoded)
+                plain_parts.append(_html_to_text(decoded) if _looks_like_html(decoded) else decoded)
             elif mime_type == "text/html":
                 html_parts.append(_html_to_text(decoded))
 
@@ -274,6 +274,8 @@ def _extract_message_body(payload: dict[str, Any]) -> str:
 
     visit(payload)
     body = "\n".join(plain_parts or html_parts)
+    if _looks_like_html(body):
+        body = _html_to_text(body)
     return _clean_body_text(body)
 
 
@@ -284,11 +286,24 @@ def _decode_base64url(data: str) -> str:
 
 
 def _html_to_text(raw_html: str) -> str:
-    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw_html)
+    text = re.sub(r"(?is)<!--.*?-->", " ", raw_html)
+    text = re.sub(r"(?is)<head\b.*?</head>", " ", text)
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p>", "\n", text)
+    text = re.sub(
+        r"(?i)</?(?:p|div|tr|td|table|h[1-6]|li|ul|ol|section|article|body)[^>]*>",
+        "\n",
+        text,
+    )
     text = re.sub(r"<[^>]+>", " ", text)
     return html_lib.unescape(text)
+
+
+def _looks_like_html(text: str) -> bool:
+    return re.search(
+        r"(?is)<!doctype|<html\b|<body\b|<head\b|</(?:div|table|td|tr|p|span)>|<br\s*/?>",
+        text,
+    ) is not None
 
 
 def _clean_body_text(text: str) -> str:
