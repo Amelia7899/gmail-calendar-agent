@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+import json
+import os
+import html
 import re
+from urllib import error, request
 
 
 EVENT_KEYWORDS = (
@@ -11,27 +16,131 @@ EVENT_KEYWORDS = (
     "interview",
     "class",
     "workshop",
+    "presentation",
+    "lecture",
+    "assessment",
+    "exam",
+    "quiz",
+    "seminar",
+    "webinar",
+    "scheduled",
+    "schedule",
+    "invite",
+    "invited",
+    "due",
 )
+
+MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
 
 MONTH_PATTERN = (
     r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    r"jul(?:y)?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+WEEKDAY_PATTERN = "|".join(WEEKDAYS)
+DAY_PATTERN = r"\d{1,2}(?:st|nd|rd|th)?"
+PERIOD_PATTERN = r"a\.?m\.?|p\.?m\.?"
+
+DATE_EXTRACTORS = (
+    re.compile(
+        rf"\b(?:on\s+)?(?:the\s+)?(?P<day>{DAY_PATTERN})\s+of\s+"
+        rf"(?P<month>{MONTH_PATTERN})\.?(?:,?\s*(?P<year>\d{{4}}))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<day>{DAY_PATTERN})\s+(?P<month>{MONTH_PATTERN})\.?"
+        rf"(?:,?\s*(?P<year>\d{{4}}))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?P<month>{MONTH_PATTERN})\.?\s+(?P<day>{DAY_PATTERN})"
+        rf"(?:,?\s*(?P<year>\d{{4}}))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?P<year>\d{4})-(?P<month>\d{1,2})-(?P<day>\d{1,2})\b"),
+    re.compile(r"\b(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4}))?\b"),
+    re.compile(r"\b(?P<month>\d{1,2})[/-](?P<day>\d{1,2})(?:[/-](?P<year>\d{2,4}))?\b"),
 )
 
-DATE_PATTERNS = (
-    r"\b(?:today|tomorrow|tonight)\b",
-    r"\b(?:next\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-    rf"\b(?:{MONTH_PATTERN})\s+\d{{1,2}}(?:,\s*\d{{4}})?\b",
-    rf"\b\d{{1,2}}\s+(?:{MONTH_PATTERN})(?:\s+\d{{4}})?\b",
+RELATIVE_DATE_PATTERN = re.compile(r"\b(today|tonight|tomorrow)\b", re.IGNORECASE)
+WEEKDAY_DATE_PATTERN = re.compile(
+    rf"\b(?:(?P<prefix>this|next)\s+)?(?P<weekday>{WEEKDAY_PATTERN})\b",
+    re.IGNORECASE,
 )
+SCHEDULE_HEADER_PATTERN = re.compile(
+    rf"\b(?P<weekday>{WEEKDAY_PATTERN})\s+(?P<day>{DAY_PATTERN})\s+"
+    rf"(?P<month>{MONTH_PATTERN})\.?(?:\s+(?P<year>\d{{4}}))?\s*"
+    r"\((?P<time>[^)]*\d[^)]*)\)",
+    re.IGNORECASE,
+)
+LABELED_EVENT_PATTERN = re.compile(
+    r"(?P<prefix>.*?)"
+    r"(?:📅\s*)?Date\s*:\s*(?P<date>.*?)"
+    r"(?:⏰\s*)?Time\s*:\s*(?P<time>.*?)"
+    r"(?:📍\s*)?Where\s*:\s*(?P<location>.*?)"
+    r"(?=\s+[A-Z0-9][^📅⏰📍]{2,260}?(?:📅\s*)?Date\s*:|\s+https?://|\s+_{5,}|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+DATE_LABEL_PATTERN = re.compile(r"(?:📅\s*)?Date\s*:", re.IGNORECASE)
+TIME_LABEL_PATTERN = re.compile(r"(?:⏰\s*)?Time\s*:", re.IGNORECASE)
+WHERE_LABEL_PATTERN = re.compile(r"(?:📍\s*)?Where\s*:", re.IGNORECASE)
 
-TIME_PATTERN = re.compile(
-    r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b"
-    r"(?:\s*(?:-|to|until)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b)?",
+TIME_RANGE_PATTERN = re.compile(
+    rf"\b(?P<start>\d{{1,2}}(?:(?::|\.)\d{{2}})?)\s*(?P<start_period>{PERIOD_PATTERN})?"
+    rf"\s*(?:-|to|until)\s*"
+    rf"(?P<end>\d{{1,2}}(?:(?::|\.)\d{{2}})?)\s*(?P<end_period>{PERIOD_PATTERN})?\b",
+    re.IGNORECASE,
+)
+TIME_SINGLE_PATTERN = re.compile(
+    rf"\b(?P<time>\d{{1,2}}(?:(?::|\.)\d{{2}})?)\s*(?P<period>{PERIOD_PATTERN})\b"
+    r"|\b(?P<time24>(?:[01]?\d|2[0-3]):[0-5]\d)\b",
     re.IGNORECASE,
 )
 
-ONLINE_LOCATION_WORDS = ("online", "zoom", "google meet", "teams")
+LOCATION_LABEL_PATTERN = re.compile(
+    r"\b(?:where|location|venue|place|address)\s*[:\-]\s*([^\n.]+)",
+    re.IGNORECASE,
+)
+ROOM_LINE_PATTERN = re.compile(r"^ROOM\s*(?P<room>\d+)\s*:\s*(?P<location>.+)$", re.IGNORECASE)
+ADDRESS_PATTERN = re.compile(
+    r"\b\d{1,5}\s+[A-Z][A-Za-z0-9.' -]+"
+    r"(?:Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Place|Pl|Terrace|Tce)\b"
+    r"(?:,\s*[A-Z][A-Za-z .'-]+)?"
+)
 
 
 def is_event_related(text: str) -> bool:
@@ -39,25 +148,276 @@ def is_event_related(text: str) -> bool:
     return any(keyword in lower_text for keyword in EVENT_KEYWORDS)
 
 
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+LAST_EXTRACTION_STATUS = {
+    "engine": "Rules",
+    "message": "Rule-based extraction is active.",
+}
+
+
 def extract_events_from_emails(emails: list[dict[str, str]]) -> list[dict[str, str]]:
+    llm_events = extract_events_with_llm_if_available(emails)
+    if llm_events is not None:
+        return llm_events
+
     events = []
 
     for email in emails:
-        event = extract_event_from_email(email)
-        if event:
-            events.append(event)
+        events.extend(extract_events_from_email(email))
 
     return events
 
 
-def extract_event_from_email(email: dict[str, str]) -> dict[str, str] | None:
+def extract_events_from_email(email: dict[str, str]) -> list[dict[str, str]]:
     subject = email.get("subject", "No subject").strip() or "No subject"
     body = email.get("body", "").strip()
-    text = f"{subject}\n{body}"
+    text = normalize_text(f"{subject}\n{body}")
 
     if not is_event_related(text):
+        return []
+
+    labeled_events = extract_labeled_events(email, text)
+    if labeled_events:
+        return labeled_events
+
+    schedule_events = extract_schedule_events(email, text)
+    if schedule_events:
+        return schedule_events
+
+    event = build_single_event(email, subject, body, text)
+    return [event] if is_meaningful_event(event) else []
+
+
+def extract_event_from_email(email: dict[str, str]) -> dict[str, str] | None:
+    events = extract_events_from_email(email)
+    return events[0] if events else None
+
+
+def llm_extractor_enabled() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def get_extractor_status() -> dict[str, str]:
+    return LAST_EXTRACTION_STATUS.copy()
+
+
+def set_extractor_status(engine: str, message: str) -> None:
+    LAST_EXTRACTION_STATUS["engine"] = engine
+    LAST_EXTRACTION_STATUS["message"] = message
+
+
+def extract_events_with_llm_if_available(
+    emails: list[dict[str, str]],
+) -> list[dict[str, str]] | None:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        set_extractor_status("Rules", "No OPENAI_API_KEY found, using rule-based extraction.")
         return None
 
+    events = []
+    for email in emails:
+        events.extend(extract_events_from_email_with_llm(email, api_key))
+
+    return events
+
+
+def extract_events_from_email_with_llm(
+    email: dict[str, str],
+    api_key: str,
+) -> list[dict[str, str]]:
+    subject = email.get("subject", "No subject").strip() or "No subject"
+    sender = email.get("sender", "Unknown sender")
+    sent_date = email.get("date", "Unknown date")
+    body = normalize_text(email.get("body", ""))
+    source_email = email.get("source", email.get("id", "email"))
+    model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
+
+    payload = {
+        "model": model,
+        "input": [
+            {
+                "role": "system",
+                "content": build_llm_system_prompt(),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Current date: {date.today().isoformat()}\n"
+                    f"Email subject: {subject}\n"
+                    f"Sender: {sender}\n"
+                    f"Email sent date: {sent_date}\n"
+                    f"Source email: {source_email}\n\n"
+                    f"Email body:\n{body[:12000]}"
+                ),
+            },
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "email_calendar_events",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "events": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "date": {"type": "string"},
+                                    "time": {"type": "string"},
+                                    "location": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "source_email": {"type": "string"},
+                                },
+                                "required": [
+                                    "title",
+                                    "date",
+                                    "time",
+                                    "location",
+                                    "description",
+                                    "source_email",
+                                ],
+                            },
+                        }
+                    },
+                    "required": ["events"],
+                },
+            }
+        },
+    }
+
+    try:
+        response_data = post_openai_response(payload, api_key)
+        content = extract_response_text(response_data)
+        parsed = json.loads(content)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        set_extractor_status("Rules", f"LLM extraction failed, using rules instead: {exc}")
+        return extract_events_from_email(email)
+
+    llm_events = normalize_llm_events(parsed.get("events", []), source_email)
+    rule_events = extract_events_from_email(email)
+
+    if len(rule_events) > len(llm_events) and has_concrete_schedule(rule_events):
+        set_extractor_status(
+            "Rules",
+            "LLM returned fewer events than the schedule parser, using the fuller rule-based split.",
+        )
+        return rule_events
+
+    set_extractor_status("LLM", f"LLM extracted {len(llm_events)} event(s).")
+    return llm_events
+
+
+def build_llm_system_prompt() -> str:
+    return (
+        "You are an email-to-calendar extraction engine. Extract all real calendar "
+        "events from the email and return JSON that matches the schema.\n\n"
+        "Event splitting rules:\n"
+        "- Do not summarize a schedule as one event. If an email lists multiple "
+        "date/time/location rows, return one event for each row.\n"
+        "- If one date heading applies to several rooms, sessions, venues, or groups, "
+        "create one event per room/session/venue/group using the inherited date and time.\n"
+        "- If two rooms happen at the same date/time, they are still two separate events "
+        "because the locations differ.\n"
+        "- If one event has a time range like '3-5pm', output '15:00-17:00'. If it says "
+        "'2-3pm', output '14:00-15:00'. Always use 24-hour time.\n"
+        "- Dates must be YYYY-MM-DD. Infer missing years from the current date.\n\n"
+        "Filtering rules:\n"
+        "- Return no events for discussion digests, forum questions, preference links, "
+        "email footers, Canvas/Edstem notification boilerplate, or questions like "
+        "'When will A4 release?' unless a concrete scheduled date is actually stated.\n"
+        "- A word such as 'time' or 'assigned' is not a calendar time by itself.\n"
+        "- Do not invent a date, time, or location. Use exactly 'Needs review' for a "
+        "missing time or missing location.\n"
+        "- Clean HTML tags such as </p> from every field.\n\n"
+        "Title rules:\n"
+        "- Make event titles specific. For schedules, include the session/room/group "
+        "when that is what distinguishes the event.\n"
+        "- Keep descriptions short but include useful context such as presenters or topic "
+        "if available.\n\n"
+        "Example: 'MONDAY 25th MAY (3-5pm) * ROOM 1: SCIENCE B303, Room 155 "
+        "* ROOM 2: 260-009 - 12 GRAFTON RD' must return two events, both dated "
+        "YYYY-05-25 with time '15:00-17:00', one for ROOM 1 and one for ROOM 2."
+    )
+
+
+def post_openai_response(payload: dict, api_key: str) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        OPENAI_RESPONSES_URL,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with request.urlopen(req, timeout=40) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise OSError(f"OpenAI request failed: {detail}") from exc
+
+
+def extract_response_text(response_data: dict) -> str:
+    if response_data.get("output_text"):
+        return response_data["output_text"]
+
+    for output_item in response_data.get("output", []):
+        for content_item in output_item.get("content", []):
+            if content_item.get("type") == "output_text" and content_item.get("text"):
+                return content_item["text"]
+
+    raise KeyError("No output text in OpenAI response")
+
+
+def normalize_llm_events(events: list[dict], source_email: str) -> list[dict[str, str]]:
+    clean_events = []
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+
+        clean_event = {
+            "title": clean_value(strip_html(str(event.get("title", "Untitled event")))),
+            "date": clean_value(str(event.get("date", "Needs review"))),
+            "time": clean_value(str(event.get("time", "Needs review"))),
+            "location": clean_value(strip_html(str(event.get("location", "Needs review")))),
+            "description": clean_value(strip_html(str(event.get("description", "")))),
+            "source_email": clean_value(str(event.get("source_email", source_email))),
+        }
+
+        if is_meaningful_event(clean_event):
+            clean_events.append(clean_event)
+
+    return clean_events
+
+
+def has_concrete_schedule(events: list[dict[str, str]]) -> bool:
+    if len(events) < 2:
+        return False
+
+    return all(
+        event.get("date") != "Needs review"
+        and event.get("time") != "Needs review"
+        and event.get("location") != "Needs review"
+        for event in events
+    )
+
+
+def build_single_event(
+    email: dict[str, str],
+    subject: str,
+    body: str,
+    text: str,
+) -> dict[str, str]:
     return {
         "title": subject,
         "date": extract_date(text),
@@ -68,48 +428,585 @@ def extract_event_from_email(email: dict[str, str]) -> dict[str, str] | None:
     }
 
 
-def extract_date(text: str) -> str:
-    for pattern in DATE_PATTERNS:
-        match = re.search(pattern, text, re.IGNORECASE)
+def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+    headers = list(SCHEDULE_HEADER_PATTERN.finditer(text))
+    if not headers:
+        return []
+
+    subject = email.get("subject", "No subject").strip() or "No subject"
+    source_email = email.get("source", email.get("id", "sample email"))
+    events = []
+
+    for index, header in enumerate(headers):
+        section_end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+        section = text[header.end() : section_end]
+        event_date = date_from_parts(
+            header.group("day"),
+            header.group("month"),
+            header.groupdict().get("year"),
+            date.today(),
+        )
+        event_time = normalize_time_expression(header.group("time")) or "Needs review"
+        room_locations = extract_room_locations(section)
+
+        if not room_locations:
+            location = extract_location(section)
+            room_locations = [("", location)] if location != "Needs review" else []
+
+        for room_label, location in room_locations:
+            title = subject
+            if room_label:
+                title = f"{subject} - Room {room_label}"
+
+            events.append(
+                {
+                    "title": title,
+                    "date": event_date or "Needs review",
+                    "time": event_time,
+                    "location": location,
+                    "description": build_schedule_description(section, room_label),
+                    "source_email": source_email,
+                }
+            )
+
+    return events
+
+
+def extract_room_locations(section: str) -> list[tuple[str, str]]:
+    items = [clean_value(item) for item in re.split(r"\s+\*\s+", section)]
+    room_locations = []
+
+    for item in items:
+        item = item.lstrip("* ")
+        match = ROOM_LINE_PATTERN.match(item)
+        if not match:
+            continue
+
+        location = clean_location_candidate(match.group("location"))
+        if location:
+            room_locations.append((match.group("room"), location))
+
+    return room_locations
+
+
+def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+    date_matches = list(DATE_LABEL_PATTERN.finditer(text))
+    if not date_matches:
+        return []
+
+    subject = email.get("subject", "No subject").strip() or "No subject"
+    source_email = email.get("source", email.get("id", "sample email"))
+    events = []
+    pending_prefix = text[: date_matches[0].start()]
+
+    for index, date_match in enumerate(date_matches):
+        next_date_start = (
+            date_matches[index + 1].start() if index + 1 < len(date_matches) else len(text)
+        )
+        time_match = TIME_LABEL_PATTERN.search(text, date_match.end(), next_date_start)
+        if not time_match:
+            continue
+        where_match = WHERE_LABEL_PATTERN.search(text, time_match.end(), next_date_start)
+        if not where_match:
+            continue
+
+        date_text = text[date_match.end() : time_match.start()]
+        time_text = text[time_match.end() : where_match.start()]
+        raw_location = text[where_match.end() : next_date_start]
+        location, next_prefix = split_location_and_next_prefix(raw_location)
+
+        title = infer_title_from_prefix(pending_prefix, subject)
+        event_date = parse_date_text(date_text)
+        event_time = normalize_time_expression(time_text) or "Needs review"
+        description = clean_value(strip_html(pending_prefix)) or subject
+
+        event = {
+            "title": title,
+            "date": event_date or "Needs review",
+            "time": event_time,
+            "location": location or "Needs review",
+            "description": description,
+            "source_email": source_email,
+        }
+
+        if is_meaningful_event(event):
+            events.append(event)
+
+        pending_prefix = next_prefix
+
+    return events
+
+
+def split_location_and_next_prefix(raw_location: str) -> tuple[str | None, str]:
+    value = clean_value(strip_html(raw_location))
+    link_tail = ""
+    link_match = re.search(
+        r"\s+(?:Register here:\s*)?https?://\S+\s*(?P<tail>.*)$",
+        value,
+        re.IGNORECASE,
+    )
+    if link_match:
+        link_tail = clean_value(link_match.group("tail"))
+        value = value[: link_match.start()]
+
+    value = clean_value(value)
+
+    if not value:
+        return None, ""
+
+    location_patterns = (
+        r"(?P<loc>Grafton Atrium and Sweet As Crepes will be outside the main entrance)\b",
+        r"(?P<loc>Outside Grafton Atrium)\b",
+        r"(?P<loc>Grafton Atrium)\b",
+        r"(?P<loc>Domain Grandstand)\b",
+        r"(?P<loc>\d{3}\s+Student Kitchen)\b",
+        r"(?P<loc>\d{3}[A-Z]?(?:-\w+)?)\b",
+        r"(?P<loc>SCIENCE\s+B\d+,\s*Room\s*\d+(?:\s*\([^)]*\))?)\b",
+        r"(?P<loc>\d{3}-\d{3}\s+-\s+\d+\s+[A-Z ]+\s+-\s+[A-Za-z0-9 ]+)\b",
+    )
+
+    for pattern in location_patterns:
+        match = re.match(pattern, value, re.IGNORECASE)
         if match:
-            return clean_value(match.group(0))
+            location = clean_location_candidate(match.group("loc"))
+            tail = clean_value(f"{value[match.end() :]} {link_tail}")
+            return location, tail
+
+    words = value.split()
+    if len(words) > 6:
+        return (
+            clean_location_candidate(" ".join(words[:6])),
+            clean_value(f"{' '.join(words[6:])} {link_tail}"),
+        )
+
+    return clean_location_candidate(value), link_tail
+
+
+def parse_date_text(value: str) -> str | None:
+    return parse_explicit_date(clean_value(value), date.today())
+
+
+def infer_title_from_prefix(prefix: str, fallback_title: str) -> str:
+    text = clean_value(strip_html(prefix))
+    text = re.split(r"\b(?:What['’]?s On This Week|Next Week)\b", text, flags=re.IGNORECASE)[-1]
+    text = clean_value(text)
+
+    if not text:
+        return fallback_title
+
+    line_candidates = [clean_value(line) for line in text.splitlines() if clean_value(line)]
+    if line_candidates:
+        heading = first_heading_like_text(line_candidates)
+        if heading:
+            return shorten_before_description_verb(heading)
+
+    sentence = re.split(r"(?<=[.!?])\s+", text, maxsplit=1)[0]
+    shortened = shorten_before_description_verb(sentence)
+    return shortened or fallback_title
+
+
+def first_heading_like_text(lines: list[str]) -> str | None:
+    for line in reversed(lines):
+        if 2 <= len(line) <= 90 and not line.endswith((".", "!", "?")):
+            return line
+
+    return None
+
+
+def shorten_before_description_verb(text: str) -> str:
+    markers = (
+        " is finally here",
+        " Empower ",
+        " Decorate ",
+        " Join ",
+        " An evening ",
+        " Celebrate ",
+        " Treat ",
+        " Need ",
+        " Our much-loved ",
+        " The last week ",
+    )
+    for marker in markers:
+        if marker in text:
+            return clean_value(text.split(marker, 1)[0])
+
+    words = text.split()
+    if len(words) > 10:
+        return clean_value(" ".join(words[:10]))
+
+    return clean_value(text)
+
+
+def extract_date(text: str, today: date | None = None) -> str:
+    today = today or date.today()
+
+    for unit in ranked_text_units(text):
+        parsed_date = parse_explicit_date(unit, today)
+        if parsed_date:
+            return parsed_date
+
+    for unit in ranked_text_units(text):
+        parsed_date = parse_relative_date(unit, today)
+        if parsed_date:
+            return parsed_date
 
     return "Needs review"
 
 
 def extract_time(text: str) -> str:
-    match = TIME_PATTERN.search(text)
-    if match:
-        return clean_value(match.group(0))
+    for unit in ranked_text_units(text):
+        normalized_time = normalize_time_expression(unit)
+        if normalized_time:
+            return normalized_time
 
     return "Needs review"
 
 
+def normalize_time_expression(text: str) -> str | None:
+    for match in TIME_RANGE_PATTERN.finditer(text):
+        normalized_range = normalize_time_range(match)
+        if normalized_range:
+            return normalized_range
+
+    for match in TIME_SINGLE_PATTERN.finditer(text):
+        normalized_time = normalize_single_time_match(match)
+        if normalized_time:
+            return normalized_time
+
+    return None
+
+
+def normalize_time_range(match: re.Match[str]) -> str | None:
+    start_token = match.group("start")
+    end_token = match.group("end")
+    start_period = normalize_period(match.groupdict().get("start_period"))
+    end_period = normalize_period(match.groupdict().get("end_period"))
+
+    if not start_period and end_period:
+        start_period = infer_start_period(start_token, end_token, end_period)
+
+    start_time = parse_time_token(start_token, start_period)
+    end_time = parse_time_token(end_token, end_period or start_period)
+
+    if not start_time or not end_time:
+        return None
+
+    return f"{start_time}-{end_time}"
+
+
+def normalize_single_time_match(match: re.Match[str]) -> str | None:
+    if match.groupdict().get("time24"):
+        return parse_time_token(match.group("time24"), None)
+
+    return parse_time_token(match.group("time"), normalize_period(match.group("period")))
+
+
+def infer_start_period(start_token: str, end_token: str, end_period: str) -> str:
+    start_hour = int(start_token.replace(".", ":").split(":", 1)[0])
+    end_hour = int(end_token.replace(".", ":").split(":", 1)[0])
+
+    if end_period == "pm" and start_hour > end_hour and start_hour != 12:
+        return "am"
+
+    return end_period
+
+
+def parse_time_token(token: str, period: str | None) -> str | None:
+    token = token.replace(".", ":")
+
+    if ":" in token:
+        hour_text, minute_text = token.split(":", 1)
+        hour = int(hour_text)
+        minute = int(minute_text)
+    else:
+        hour = int(token)
+        minute = 0
+
+    if minute > 59:
+        return None
+
+    if period:
+        if not 1 <= hour <= 12:
+            return None
+        if period == "am" and hour == 12:
+            hour = 0
+        elif period == "pm" and hour != 12:
+            hour += 12
+    elif not 0 <= hour <= 23:
+        return None
+
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_period(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    return value.lower().replace(".", "")
+
+
 def extract_location(text: str) -> str:
-    lower_text = text.lower()
+    labeled_location = extract_labeled_location(text)
+    if labeled_location:
+        return labeled_location
 
-    for word in ONLINE_LOCATION_WORDS:
-        if word in lower_text:
-            return "Online" if word == "online" else word.title()
+    for unit in ranked_text_units(text):
+        location = extract_location_from_unit(unit)
+        if location:
+            return location
 
-    room_match = re.search(r"\b(?:in|at)\s+((?:Room|room)\s*[A-Za-z0-9-]+)\b", text)
+    return "Needs review"
+
+
+def extract_labeled_location(text: str) -> str | None:
+    for match in LOCATION_LABEL_PATTERN.finditer(normalize_text(text)):
+        location = clean_location_candidate(match.group(1))
+        if location:
+            return location
+
+    return None
+
+
+def extract_location_from_unit(unit: str) -> str | None:
+    online_location = detect_online_location(unit)
+    if online_location:
+        return online_location
+
+    class_match = re.search(r"\b(?:in|during)\s+class\b", unit, re.IGNORECASE)
+    if class_match:
+        return "In class"
+
+    room_match = re.search(r"\b(?:in|at)?\s*((?:Room|room)\s*[A-Za-z0-9-]+)\b", unit)
     if room_match:
         return clean_value(room_match.group(1))
 
+    address_match = ADDRESS_PATTERN.search(unit)
+    if address_match:
+        return clean_value(address_match.group(0))
+
     place_match = re.search(
-        r"\b(?:in|at)\s+([A-Z][A-Za-z0-9&.' -]{1,60}"
+        r"\b(?:in|at)\s+([A-Z][A-Za-z0-9&.' -]{1,80}"
         r"(?:Clinic|Center|Centre|Hall|Office|Room|Building|Library|Lab|Theater|Theatre))\b",
-        text,
+        unit,
     )
     if place_match:
         return clean_value(place_match.group(1))
 
-    return "Needs review"
+    return None
+
+
+def detect_online_location(unit: str) -> str | None:
+    lower_unit = unit.lower()
+
+    if "google meet" in lower_unit or "meet.google.com" in lower_unit:
+        return "Google Meet"
+    if "zoom" in lower_unit or "zoom.us" in lower_unit:
+        return "Zoom"
+    if "microsoft teams" in lower_unit or re.search(r"\bteams\b", lower_unit):
+        return "Microsoft Teams"
+    if re.search(r"\b(online|virtual)\b", lower_unit) and has_online_location_context(lower_unit):
+        return "Online"
+
+    return None
+
+
+def has_online_location_context(unit: str) -> bool:
+    return re.search(
+        r"\b(held|happen|happens|meeting|session|event|interview|workshop|class|"
+        r"webinar|lecture|presentation|join|via|where|location|venue)\b",
+        unit,
+        re.IGNORECASE,
+    ) is not None
+
+
+def clean_location_candidate(value: str) -> str | None:
+    online_location = detect_online_location(value)
+    if online_location:
+        return online_location
+
+    value = re.split(
+        r"\s+(?:date|when|time|agenda|description|details|join)\s*:",
+        clean_value(value),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,;.-")
+
+    if not value or value.lower() in {"tbd", "to be determined", "none", "n/a"}:
+        return None
+
+    return value
+
+
+def ranked_text_units(text: str) -> list[str]:
+    units = split_text_units(text)
+    priority_units = [unit for unit in units if is_event_related(unit) or has_date_language(unit)]
+    other_units = [unit for unit in units if unit not in priority_units]
+    return priority_units + other_units
+
+
+def split_text_units(text: str) -> list[str]:
+    text = normalize_text(text)
+    rough_units = re.split(r"(?<=[.!?])\s+|\n+", text)
+    units = []
+
+    for unit in rough_units:
+        unit = clean_value(unit)
+        if unit and not looks_like_footer(unit):
+            units.append(unit)
+
+    return units or [text]
+
+
+def parse_explicit_date(text: str, today: date) -> str | None:
+    for pattern in DATE_EXTRACTORS:
+        match = pattern.search(text)
+        if not match:
+            continue
+
+        parsed_date = date_from_parts(
+            match.group("day"),
+            match.group("month"),
+            match.groupdict().get("year"),
+            today,
+        )
+        if parsed_date:
+            return parsed_date
+
+    return None
+
+
+def parse_relative_date(text: str, today: date) -> str | None:
+    relative_match = RELATIVE_DATE_PATTERN.search(text)
+    if relative_match:
+        value = relative_match.group(1).lower()
+        if value in {"today", "tonight"}:
+            return today.isoformat()
+        if value == "tomorrow":
+            return (today + timedelta(days=1)).isoformat()
+
+    weekday_match = WEEKDAY_DATE_PATTERN.search(text)
+    if not weekday_match:
+        return None
+
+    weekday = WEEKDAYS[weekday_match.group("weekday").lower()]
+    days_ahead = (weekday - today.weekday()) % 7
+
+    if weekday_match.group("prefix") and weekday_match.group("prefix").lower() == "next":
+        days_ahead = days_ahead or 7
+
+    return (today + timedelta(days=days_ahead)).isoformat()
+
+
+def date_from_parts(
+    day_text: str,
+    month_text: str,
+    year_text: str | None,
+    today: date,
+) -> str | None:
+    day = parse_day(day_text)
+    month = parse_month(month_text)
+    if day is None or month is None:
+        return None
+
+    year = parse_year(year_text, month, day, today)
+    parsed_date = safe_date(year, month, day)
+    return parsed_date.isoformat() if parsed_date else None
+
+
+def parse_month(value: str) -> int | None:
+    value = value.lower().strip(".")
+
+    if value.isdigit():
+        month = int(value)
+        return month if 1 <= month <= 12 else None
+
+    return MONTHS.get(value[:3])
+
+
+def parse_day(value: str) -> int | None:
+    day = int(re.sub(r"(st|nd|rd|th)$", "", value.lower()))
+    return day if 1 <= day <= 31 else None
+
+
+def parse_year(value: str | None, month: int, day: int, today: date) -> int:
+    if value:
+        year = int(value)
+        return 2000 + year if year < 100 else year
+
+    candidate = safe_date(today.year, month, day)
+    if candidate and candidate >= today:
+        return today.year
+
+    return today.year + 1
+
+
+def safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def is_meaningful_event(event: dict[str, str]) -> bool:
+    return event.get("date") != "Needs review" or event.get("time") != "Needs review"
+
+
+def has_date_language(text: str) -> bool:
+    lower_text = text.lower()
+    return any(word in lower_text for word in (" on ", "date", "when", "scheduled", "due", "deadline"))
 
 
 def build_description(body: str) -> str:
-    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    lines = [clean_value(strip_html(line)) for line in body.splitlines()]
+    lines = [line for line in lines if line and not looks_like_footer(line)]
     return " ".join(lines) if lines else "No description"
+
+
+def build_schedule_description(section: str, room_label: str) -> str:
+    items = [clean_value(item) for item in re.split(r"\s+\*\s+", section)]
+    presenters = []
+    room_seen = False
+
+    for item in items:
+        item = item.lstrip("* ")
+        room_match = ROOM_LINE_PATTERN.match(item)
+        if room_match:
+            room_seen = room_match.group("room") == room_label
+            continue
+        if room_seen and item:
+            presenters.append(item)
+
+    return "; ".join(presenters) if presenters else clean_value(section)
+
+
+def normalize_text(text: str) -> str:
+    text = strip_html(text)
+    text = text.replace("\u00a0", " ")
+    text = text.replace("\u2013", "-").replace("\u2014", "-")
+    return "\n".join(clean_value(line) for line in text.splitlines() if clean_value(line))
+
+
+def strip_html(text: str) -> str:
+    text = re.sub(r"(?is)<(script|style).*?</\1>", " ", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return html.unescape(text)
+
+
+def looks_like_footer(text: str) -> bool:
+    lower_text = text.lower()
+    return any(
+        marker in lower_text
+        for marker in (
+            "unsubscribe",
+            "email notifications",
+            "privacy policy",
+            "terms of service",
+            "you received this email because",
+            "edit your email preferences",
+        )
+    )
 
 
 def clean_value(value: str) -> str:

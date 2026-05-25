@@ -3,7 +3,11 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from agent.event_extractor import extract_events_from_emails
+from agent.event_extractor import (
+    extract_events_from_emails,
+    get_extractor_status,
+    llm_extractor_enabled,
+)
 from agent.gmail_reader import (
     DEFAULT_CREDENTIALS_PATH,
     GmailReaderError,
@@ -61,6 +65,9 @@ def scan_emails(emails: list[dict[str, str]], source_label: str) -> None:
     st.session_state["schedule_items"] = schedule_items
     st.session_state["event_decisions"] = ["pending"] * len(schedule_items)
     st.session_state["schedule_source"] = source_label
+    st.session_state["last_scan_email_count"] = len(emails)
+    st.session_state["last_scan_event_count"] = len(schedule_items)
+    st.session_state["last_extractor_status"] = get_extractor_status()
 
 
 def mark_event(index: int, decision: str) -> None:
@@ -193,6 +200,11 @@ handle_gmail_callback()
 st.title("Gmail Calendar Agent Demo")
 st.caption("Scan sample emails or connect Gmail, then review events before confirming.")
 
+if llm_extractor_enabled():
+    st.success("LLM event extraction is enabled.")
+else:
+    st.info("Rule-based extraction is active. Set OPENAI_API_KEY to use LLM extraction.")
+
 if st.session_state.pop("gmail_login_success", False):
     st.success("Gmail login saved. You can scan Gmail now.")
 
@@ -221,6 +233,7 @@ if source_mode == "Sample emails":
 
     if st.button("Scan sample emails", type="primary"):
         scan_emails(emails, "Sample emails")
+        st.rerun()
 else:
     st.subheader("Gmail inbox")
 
@@ -236,7 +249,7 @@ else:
 
             st.session_state["gmail_emails"] = gmail_emails
             scan_emails(gmail_emails, "Gmail")
-            st.success(f"Read {len(gmail_emails)} Gmail messages.")
+            st.rerun()
         except GmailReaderError as exc:
             st.error(str(exc))
 
@@ -261,6 +274,25 @@ st.caption(f"Current source: {st.session_state.get('schedule_source', 'Not scann
 
 schedule_items = st.session_state.get("schedule_items", [])
 event_decisions = st.session_state.get("event_decisions", [])
+last_scan_event_count = st.session_state.get("last_scan_event_count")
+
+if last_scan_event_count is not None:
+    extractor_status = st.session_state.get(
+        "last_extractor_status",
+        {"engine": "Rules", "message": "Rule-based extraction is active."},
+    )
+    scan_engine = extractor_status.get("engine", "Rules")
+    email_count = st.session_state.get("last_scan_email_count", 0)
+    st.caption(extractor_status.get("message", ""))
+    if last_scan_event_count:
+        st.success(
+            f"{scan_engine} extracted {last_scan_event_count} event(s) "
+            f"from {email_count} email(s)."
+        )
+    else:
+        st.warning(
+            f"{scan_engine} scanned {email_count} email(s), but found no clear calendar events."
+        )
 
 if len(event_decisions) != len(schedule_items):
     event_decisions = ["pending"] * len(schedule_items)
@@ -278,15 +310,16 @@ if schedule_items:
 
     table_rows = [
         {
-            "Title": event.get("title", "Untitled event"),
             "Date": event.get("date", "Needs review"),
             "Time": event.get("time", "Needs review"),
+            "Event": event.get("title", "Untitled event"),
             "Location": event.get("location", "Needs review"),
             "Source email": event.get("source_email", "sample email"),
             "Decision": DECISION_LABELS.get(event_decisions[index], "Pending review"),
         }
         for index, event in enumerate(schedule_items)
     ]
+    st.markdown("**Extracted events**")
     st.dataframe(table_rows, width="stretch", hide_index=True)
 
     for index, event in enumerate(schedule_items):
