@@ -141,6 +141,12 @@ ADDRESS_PATTERN = re.compile(
     r"(?:Street|St|Road|Rd|Avenue|Ave|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Place|Pl|Terrace|Tce)\b"
     r"(?:,\s*[A-Z][A-Za-z .'-]+)?"
 )
+CANVAS_ASSIGNMENT_PATTERN = re.compile(
+    r"\bAssignment\s+created\s*-\s*"
+    r"(?P<title>[^:\n]+?,\s*[A-Z]{2,}\s*\d{3}[A-Z]?)"
+    r"\s*:\s*(?P<course>.*?)\s+due:\s*(?P<due>.*?)(?=\s+https?://|\s+You\s+can\s+change|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def is_event_related(text: str) -> bool:
@@ -185,6 +191,10 @@ def extract_events_from_email(email: dict[str, str]) -> list[dict[str, str]]:
 
     if not is_event_related(text):
         return []
+
+    canvas_events = extract_canvas_assignment_events(email, text)
+    if canvas_events:
+        return canvas_events
 
     labeled_events = extract_labeled_events(email, text)
     if labeled_events:
@@ -315,8 +325,12 @@ def extract_events_from_email_with_llm(
         )
         return rule_events
 
-    set_extractor_status("LLM", f"LLM extracted {len(llm_events)} event(s).")
-    return llm_events
+    merged_events = merge_events_with_rule_fallback(llm_events, rule_events)
+    set_extractor_status(
+        "LLM",
+        f"LLM extracted {len(merged_events)} event(s), with rules filling any missing fields.",
+    )
+    return merged_events
 
 
 def build_llm_system_prompt() -> str:
@@ -386,6 +400,32 @@ def normalize_llm_events(events: list[dict], source_email: str) -> list[dict[str
     return clean_events
 
 
+def merge_events_with_rule_fallback(
+    llm_events: list[dict[str, str]],
+    rule_events: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    if len(llm_events) != len(rule_events):
+        return llm_events
+
+    merged_events = []
+    for llm_event, rule_event in zip(llm_events, rule_events):
+        merged_event = llm_event.copy()
+        for field in ("date", "time", "location"):
+            if needs_review(merged_event.get(field)) and not needs_review(rule_event.get(field)):
+                merged_event[field] = rule_event[field]
+
+        if needs_review(merged_event.get("title")) and not needs_review(rule_event.get("title")):
+            merged_event["title"] = rule_event["title"]
+
+        merged_events.append(merged_event)
+
+    return merged_events
+
+
+def needs_review(value: str | None) -> bool:
+    return not value or clean_value(value).lower() in {"needs review", "untitled event"}
+
+
 def has_concrete_schedule(events: list[dict[str, str]]) -> bool:
     if len(events) < 2:
         return False
@@ -412,6 +452,34 @@ def build_single_event(
         "description": build_description(body),
         "source_email": email.get("source", email.get("id", "sample email")),
     }
+
+
+def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+    source_email = email.get("source", email.get("id", "sample email"))
+    events = []
+
+    for match in CANVAS_ASSIGNMENT_PATTERN.finditer(text):
+        assignment_title = clean_title(match.group("title"))
+        due_text = clean_value(match.group("due"))
+        course = clean_value(match.group("course"))
+        title = clean_title(f"{assignment_title}: {course}" if course else assignment_title)
+        description = clean_value(
+            f"Canvas assignment created for {course}. Due: {due_text}"
+        )
+
+        event = {
+            "title": title,
+            "date": extract_date(due_text),
+            "time": extract_time(due_text),
+            "location": "Needs review",
+            "description": description,
+            "source_email": source_email,
+        }
+
+        if is_meaningful_event(event):
+            events.append(event)
+
+    return events
 
 
 def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
@@ -669,6 +737,10 @@ def extract_time(text: str) -> str:
         if normalized_time:
             return normalized_time
 
+    normalized_time = normalize_time_expression(normalize_text(text).replace("\n", " "))
+    if normalized_time:
+        return normalized_time
+
     return "Needs review"
 
 
@@ -701,7 +773,20 @@ def normalize_time_range(match: re.Match[str]) -> str | None:
     if not start_time or not end_time:
         return None
 
+    if not start_period and not end_period:
+        start_time, end_time = adjust_ambiguous_daytime_range(start_time, end_time)
+
     return f"{start_time}-{end_time}"
+
+
+def adjust_ambiguous_daytime_range(start_time: str, end_time: str) -> tuple[str, str]:
+    start_hour = int(start_time.split(":", 1)[0])
+    end_hour = int(end_time.split(":", 1)[0])
+
+    if 7 <= start_hour <= 11 and 1 <= end_hour <= 6 and end_hour < start_hour:
+        return start_time, f"{end_hour + 12:02d}:00"
+
+    return start_time, end_time
 
 
 def normalize_single_time_match(match: re.Match[str]) -> str | None:
@@ -785,6 +870,15 @@ def extract_location_from_unit(unit: str) -> str | None:
     class_match = re.search(r"\b(?:in|during)\s+class\b", unit, re.IGNORECASE)
     if class_match:
         return "In class"
+
+    floor_common_room_match = re.search(
+        r"\b(?:the\s+)?((?:\d+(?:st|nd|rd|th)\s+floor\s+)?"
+        r"common\s+room(?:\s+area)?)\b",
+        unit,
+        re.IGNORECASE,
+    )
+    if floor_common_room_match:
+        return clean_value(floor_common_room_match.group(1))
 
     compound_room_match = re.search(
         r"\b([A-Z][A-Za-z0-9&.' -]{1,80}"

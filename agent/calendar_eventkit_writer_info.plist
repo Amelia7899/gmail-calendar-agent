@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>local.gmail-calendar-agent.eventkit-writer</string>
+  <key>CFBundleExecutable</key>
+  <string>gmail_calendar_eventkit_writer</string>
+  <key>CFBundleName</key>
+  <string>Gmail Calendar Agent Calendar Writer</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Gmail Calendar Agent adds confirmed email events to Apple Calendar.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Gmail Calendar Agent adds confirmed email events to Apple Calendar.</string>
+  <key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+  <string>Gmail Calendar Agent adds confirmed email events to Apple Calendar.</string>
+</dict>
+</plist>

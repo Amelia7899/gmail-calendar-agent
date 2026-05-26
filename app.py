@@ -3,6 +3,7 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
+from agent.calendar_writer import CalendarWriterError, write_event_to_calendar
 from agent.event_extractor import (
     extract_events_from_emails,
     get_extractor_status,
@@ -21,6 +22,7 @@ from agent.gmail_reader import (
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_EMAIL_DIR = BASE_DIR / "data" / "sample_emails"
 GMAIL_REDIRECT_URI = "http://localhost:8501/"
+EXTRACTOR_STATE_VERSION = "2026-05-26-time-location-v3"
 DECISION_LABELS = {
     "pending": "Pending review",
     "confirmed": "Confirmed",
@@ -60,10 +62,29 @@ def read_sample_emails() -> list[dict[str, str]]:
     return emails
 
 
+def reset_stale_extraction_state() -> None:
+    if st.session_state.get("extractor_state_version") == EXTRACTOR_STATE_VERSION:
+        return
+
+    for key in (
+        "schedule_items",
+        "event_decisions",
+        "calendar_results",
+        "last_scan_email_count",
+        "last_scan_event_count",
+        "last_extractor_status",
+    ):
+        st.session_state.pop(key, None)
+
+    st.session_state["schedule_source"] = "Not scanned yet"
+    st.session_state["extractor_state_version"] = EXTRACTOR_STATE_VERSION
+
+
 def scan_emails(emails: list[dict[str, str]], source_label: str, use_llm: bool) -> None:
     schedule_items = extract_events_from_emails(emails, use_llm=use_llm)
     st.session_state["schedule_items"] = schedule_items
     st.session_state["event_decisions"] = ["pending"] * len(schedule_items)
+    st.session_state["calendar_results"] = [None] * len(schedule_items)
     st.session_state["schedule_source"] = source_label
     st.session_state["last_scan_email_count"] = len(emails)
     st.session_state["last_scan_event_count"] = len(schedule_items)
@@ -76,6 +97,47 @@ def mark_event(index: int, decision: str) -> None:
     if index < len(decisions):
         decisions[index] = decision
         st.session_state["event_decisions"] = decisions
+
+    if decision == "skipped":
+        calendar_results = st.session_state.get("calendar_results", [])
+        if index < len(calendar_results):
+            calendar_results[index] = None
+            st.session_state["calendar_results"] = calendar_results
+
+
+def confirm_event(index: int) -> None:
+    schedule_items = st.session_state.get("schedule_items", [])
+    decisions = st.session_state.get("event_decisions", [])
+    calendar_results = st.session_state.get("calendar_results", [])
+
+    if index >= len(schedule_items):
+        return
+
+    while len(decisions) < len(schedule_items):
+        decisions.append("pending")
+    while len(calendar_results) < len(schedule_items):
+        calendar_results.append(None)
+
+    try:
+        result = write_event_to_calendar(schedule_items[index])
+    except CalendarWriterError as exc:
+        decisions[index] = "pending"
+        calendar_results[index] = {
+            "status": "error",
+            "message": str(exc),
+        }
+    else:
+        decisions[index] = "confirmed"
+        calendar_results[index] = {
+            "status": "created",
+            "message": "Added to Apple Calendar in Email Agent.",
+            "uid": result.uid,
+            "start": result.start.strftime("%Y-%m-%d %H:%M"),
+            "end": result.end.strftime("%Y-%m-%d %H:%M"),
+        }
+
+    st.session_state["event_decisions"] = decisions
+    st.session_state["calendar_results"] = calendar_results
 
 
 def decision_badge(decision: str) -> None:
@@ -109,22 +171,32 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
         with st.expander("Description"):
             st.write(event.get("description", "No description"))
 
+        calendar_results = st.session_state.get("calendar_results", [])
+        calendar_result = calendar_results[index] if index < len(calendar_results) else None
+        if calendar_result:
+            if calendar_result.get("status") == "created":
+                st.success(calendar_result.get("message", "Added to Apple Calendar."))
+            else:
+                st.error(calendar_result.get("message", "Apple Calendar sync failed."))
+
         confirm_col, skip_col, _ = st.columns([1, 1, 4])
-        confirm_col.button(
+        if confirm_col.button(
             "Confirm",
             key=f"confirm_event_{index}",
             type="primary",
             disabled=decision == "confirmed",
-            on_click=mark_event,
-            args=(index, "confirmed"),
-        )
-        skip_col.button(
+        ):
+            with st.spinner("Adding to Apple Calendar..."):
+                confirm_event(index)
+            st.rerun()
+
+        if skip_col.button(
             "Skip",
             key=f"skip_event_{index}",
             disabled=decision == "skipped",
-            on_click=mark_event,
-            args=(index, "skipped"),
-        )
+        ):
+            mark_event(index, "skipped")
+            st.rerun()
 
 
 def build_current_url() -> str:
@@ -196,6 +268,7 @@ def show_gmail_login_controls() -> None:
 
 st.set_page_config(page_title="Gmail Calendar Agent Demo")
 handle_gmail_callback()
+reset_stale_extraction_state()
 
 st.title("Gmail Calendar Agent Demo")
 st.caption("Scan sample emails or connect Gmail, then review events before confirming.")

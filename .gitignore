@@ -5,3 +5,5 @@ __pycache__/
 credentials.json
 token.json
 .gmail_oauth_state.json
+.calendar_writer/
+Calendar Writer Helper/

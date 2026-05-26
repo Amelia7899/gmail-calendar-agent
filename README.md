@@ -1,6 +1,6 @@
 # Gmail Calendar Agent
 
-A small Streamlit prototype that reads sample emails or recent Gmail messages, extracts possible calendar events, and asks the user to confirm or skip each event before anything is written to a calendar.
+A small Streamlit prototype that reads sample emails or recent Gmail messages, extracts possible calendar events, and writes confirmed events to Apple Calendar.
 
 ## Run the demo
 
@@ -35,4 +35,6 @@ After approval, the app saves `token.json` locally so the next run can reuse the
 - Gmail mode reads the latest 10-20 inbox messages.
 - Each Gmail message is normalized with `message_id`, `subject`, `sender`, `date`, and `body`.
 - Extracted events are shown in a preview step with `Confirm` and `Skip` buttons.
-- Apple Calendar writing will be added in the next step.
+- Confirmed events are added to an Apple Calendar named `Email Agent`.
+- The first calendar write may ask for macOS Calendar access.
+- If no permission prompt appears, double-click `Calendar Writer Helper/Gmail Calendar Agent Calendar Writer.app`, then open System Settings > Privacy & Security > Calendars and allow `Gmail Calendar Agent Calendar Writer`.
