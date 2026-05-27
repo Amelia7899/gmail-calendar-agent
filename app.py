@@ -3,7 +3,12 @@ from urllib.parse import urlencode
 
 import streamlit as st
 
-from agent.calendar_writer import CalendarWriterError, write_event_to_calendar
+from agent.calendar_writer import (
+    CalendarEventValidationError,
+    CalendarWriterError,
+    write_event_to_calendar,
+    write_event_to_ics,
+)
 from agent.event_extractor import (
     extract_events_from_emails,
     get_extractor_status,
@@ -17,6 +22,7 @@ from agent.gmail_reader import (
     save_token_from_callback,
     token_exists,
 )
+from agent.memory import filter_unprocessed_emails, mark_message_processed
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -73,6 +79,7 @@ def reset_stale_extraction_state() -> None:
         "last_scan_email_count",
         "last_scan_event_count",
         "last_extractor_status",
+        "last_scan_skipped_processed_count",
     ):
         st.session_state.pop(key, None)
 
@@ -80,7 +87,12 @@ def reset_stale_extraction_state() -> None:
     st.session_state["extractor_state_version"] = EXTRACTOR_STATE_VERSION
 
 
-def scan_emails(emails: list[dict[str, str]], source_label: str, use_llm: bool) -> None:
+def scan_emails(
+    emails: list[dict[str, str]],
+    source_label: str,
+    use_llm: bool,
+    skipped_processed_count: int = 0,
+) -> None:
     schedule_items = extract_events_from_emails(emails, use_llm=use_llm)
     st.session_state["schedule_items"] = schedule_items
     st.session_state["event_decisions"] = ["pending"] * len(schedule_items)
@@ -89,14 +101,19 @@ def scan_emails(emails: list[dict[str, str]], source_label: str, use_llm: bool) 
     st.session_state["last_scan_email_count"] = len(emails)
     st.session_state["last_scan_event_count"] = len(schedule_items)
     st.session_state["last_extractor_status"] = get_extractor_status()
+    st.session_state["last_scan_skipped_processed_count"] = skipped_processed_count
 
 
 def mark_event(index: int, decision: str) -> None:
     decisions = st.session_state.get("event_decisions", [])
+    schedule_items = st.session_state.get("schedule_items", [])
 
     if index < len(decisions):
         decisions[index] = decision
         st.session_state["event_decisions"] = decisions
+
+    if decision == "skipped" and index < len(schedule_items):
+        mark_message_processed(schedule_items[index].get("message_id"))
 
     if decision == "skipped":
         calendar_results = st.session_state.get("calendar_results", [])
@@ -118,14 +135,41 @@ def confirm_event(index: int) -> None:
     while len(calendar_results) < len(schedule_items):
         calendar_results.append(None)
 
+    event = schedule_items[index]
+
     try:
-        result = write_event_to_calendar(schedule_items[index])
-    except CalendarWriterError as exc:
+        result = write_event_to_calendar(event)
+    except CalendarEventValidationError as exc:
         decisions[index] = "pending"
         calendar_results[index] = {
             "status": "error",
             "message": str(exc),
         }
+    except CalendarWriterError as exc:
+        try:
+            ics_result = write_event_to_ics(event)
+        except CalendarWriterError as ics_exc:
+            decisions[index] = "pending"
+            calendar_results[index] = {
+                "status": "error",
+                "message": (
+                    f"Apple Calendar sync failed: {exc} "
+                    f"ICS fallback also failed: {ics_exc}"
+                ),
+            }
+        else:
+            decisions[index] = "confirmed"
+            calendar_results[index] = {
+                "status": "ics",
+                "message": (
+                    "Apple Calendar sync failed, so an ICS file was created instead."
+                ),
+                "path": str(ics_result.path),
+                "uid": ics_result.uid,
+                "start": ics_result.start.strftime("%Y-%m-%d %H:%M"),
+                "end": ics_result.end.strftime("%Y-%m-%d %H:%M"),
+            }
+            mark_message_processed(event.get("message_id"))
     else:
         decisions[index] = "confirmed"
         calendar_results[index] = {
@@ -135,6 +179,7 @@ def confirm_event(index: int) -> None:
             "start": result.start.strftime("%Y-%m-%d %H:%M"),
             "end": result.end.strftime("%Y-%m-%d %H:%M"),
         }
+        mark_message_processed(event.get("message_id"))
 
     st.session_state["event_decisions"] = decisions
     st.session_state["calendar_results"] = calendar_results
@@ -176,6 +221,9 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
         if calendar_result:
             if calendar_result.get("status") == "created":
                 st.success(calendar_result.get("message", "Added to Apple Calendar."))
+            elif calendar_result.get("status") == "ics":
+                st.warning(calendar_result.get("message", "Created an ICS fallback file."))
+                st.caption(calendar_result.get("path", ""))
             else:
                 st.error(calendar_result.get("message", "Apple Calendar sync failed."))
 
@@ -327,15 +375,31 @@ else:
     if st.button("Connect and scan Gmail", type="primary", disabled=not token_exists()):
         try:
             with st.spinner("Reading recent Gmail messages..."):
-                gmail_emails = read_recent_emails(max_results=max_results)
+                raw_gmail_emails = read_recent_emails(max_results=max_results)
+
+            gmail_emails, skipped_processed_count = filter_unprocessed_emails(
+                raw_gmail_emails
+            )
 
             st.session_state["gmail_emails"] = gmail_emails
-            scan_emails(gmail_emails, "Gmail", use_llm)
+            st.session_state["gmail_processed_skip_count"] = skipped_processed_count
+            scan_emails(
+                gmail_emails,
+                "Gmail",
+                use_llm,
+                skipped_processed_count=skipped_processed_count,
+            )
             st.rerun()
         except GmailReaderError as exc:
             st.error(str(exc))
 
     gmail_emails = st.session_state.get("gmail_emails", [])
+    gmail_processed_skip_count = st.session_state.get("gmail_processed_skip_count", 0)
+
+    if gmail_processed_skip_count:
+        st.info(
+            f"Skipped {gmail_processed_skip_count} already processed Gmail message(s)."
+        )
 
     if gmail_emails:
         for email in gmail_emails:
@@ -365,7 +429,12 @@ if last_scan_event_count is not None:
     )
     scan_engine = extractor_status.get("engine", "Rules")
     email_count = st.session_state.get("last_scan_email_count", 0)
+    skipped_processed_count = st.session_state.get("last_scan_skipped_processed_count", 0)
     st.caption(extractor_status.get("message", ""))
+    if skipped_processed_count:
+        st.info(
+            f"{skipped_processed_count} already processed Gmail message(s) were left out."
+        )
     if last_scan_event_count:
         st.success(
             f"{scan_engine} extracted {last_scan_event_count} event(s) "

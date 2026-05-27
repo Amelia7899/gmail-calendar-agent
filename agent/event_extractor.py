@@ -315,7 +315,12 @@ def extract_events_from_email_with_llm(
         set_extractor_status("Rules", f"LLM extraction failed, using rules instead: {exc}")
         return extract_events_from_email(email)
 
-    llm_events = normalize_llm_events(parsed.get("events", []), source_email)
+    source_message_id = email.get("message_id", "")
+    llm_events = normalize_llm_events(
+        parsed.get("events", []),
+        source_email,
+        source_message_id,
+    )
     rule_events = extract_events_from_email(email)
 
     if len(rule_events) > len(llm_events) and has_concrete_schedule(rule_events):
@@ -377,7 +382,11 @@ def extract_response_text(response_data: dict) -> str:
     raise KeyError("No output text in OpenAI response")
 
 
-def normalize_llm_events(events: list[dict], source_email: str) -> list[dict[str, str]]:
+def normalize_llm_events(
+    events: list[dict],
+    source_email: str,
+    source_message_id: str = "",
+) -> list[dict[str, str]]:
     clean_events = []
 
     for event in events:
@@ -392,6 +401,7 @@ def normalize_llm_events(events: list[dict], source_email: str) -> list[dict[str
             or "Needs review",
             "description": clean_value(strip_markup(strip_html(str(event.get("description", ""))))),
             "source_email": clean_value(str(event.get("source_email", source_email))),
+            "message_id": source_message_id,
         }
 
         if is_meaningful_event(clean_event):
@@ -451,11 +461,13 @@ def build_single_event(
         "location": extract_location(text),
         "description": build_description(body),
         "source_email": email.get("source", email.get("id", "sample email")),
+        "message_id": email.get("message_id", ""),
     }
 
 
 def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
     source_email = email.get("source", email.get("id", "sample email"))
+    source_message_id = email.get("message_id", "")
     events = []
 
     for match in CANVAS_ASSIGNMENT_PATTERN.finditer(text):
@@ -474,6 +486,7 @@ def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[d
             "location": "Needs review",
             "description": description,
             "source_email": source_email,
+            "message_id": source_message_id,
         }
 
         if is_meaningful_event(event):
@@ -489,6 +502,7 @@ def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, 
 
     subject = email.get("subject", "No subject").strip() or "No subject"
     source_email = email.get("source", email.get("id", "sample email"))
+    source_message_id = email.get("message_id", "")
     events = []
 
     for index, header in enumerate(headers):
@@ -520,6 +534,7 @@ def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, 
                     "location": location,
                     "description": build_schedule_description(section, room_label),
                     "source_email": source_email,
+                    "message_id": source_message_id,
                 }
             )
 
@@ -550,6 +565,7 @@ def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, s
 
     subject = email.get("subject", "No subject").strip() or "No subject"
     source_email = email.get("source", email.get("id", "sample email"))
+    source_message_id = email.get("message_id", "")
     events = []
     pending_prefix = text[: date_matches[0].start()]
 
@@ -581,6 +597,7 @@ def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, s
             "location": location or "Needs review",
             "description": description,
             "source_email": source_email,
+            "message_id": source_message_id,
         }
 
         if is_meaningful_event(event):

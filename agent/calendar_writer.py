@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+import hashlib
 from pathlib import Path
 import os
 import re
@@ -15,6 +16,7 @@ DEFAULT_CALENDAR_NAME = "Email Agent"
 DEFAULT_EVENT_DURATION = timedelta(hours=1)
 NEEDS_REVIEW = "Needs review"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "ics"
 CALENDAR_APP_PATHS = (
     Path("/System/Applications/Calendar.app"),
     Path("/Applications/Calendar.app"),
@@ -92,6 +94,15 @@ class CalendarWriteResult:
     end: datetime
 
 
+@dataclass(frozen=True)
+class IcsWriteResult:
+    path: Path
+    uid: str
+    title: str
+    start: datetime
+    end: datetime
+
+
 def write_event_to_calendar(
     event: dict[str, str],
     calendar_name: str = DEFAULT_CALENDAR_NAME,
@@ -141,6 +152,121 @@ def write_event_to_calendar(
         start=prepared_event.start,
         end=prepared_event.end,
     )
+
+
+def write_event_to_ics(
+    event: dict[str, str],
+    output_dir: Path | str = DEFAULT_OUTPUT_DIR,
+    calendar_name: str = DEFAULT_CALENDAR_NAME,
+) -> IcsWriteResult:
+    prepared_event = prepare_calendar_event(event, calendar_name)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = build_event_digest(event, prepared_event)
+    uid = f"{digest}@gmail-calendar-agent.local"
+    filename = build_ics_filename(prepared_event, digest)
+    path = output_dir / filename
+    path.write_text(build_ics_text(prepared_event, uid), encoding="utf-8")
+
+    return IcsWriteResult(
+        path=path,
+        uid=uid,
+        title=prepared_event.title,
+        start=prepared_event.start,
+        end=prepared_event.end,
+    )
+
+
+def build_event_digest(
+    event: dict[str, str],
+    prepared_event: "PreparedCalendarEvent",
+) -> str:
+    identity = "|".join(
+        [
+            clean_calendar_text(event.get("message_id")),
+            prepared_event.title,
+            prepared_event.start.isoformat(),
+            prepared_event.end.isoformat(),
+            prepared_event.location,
+        ]
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+
+
+def build_ics_filename(prepared_event: "PreparedCalendarEvent", digest: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", prepared_event.title.lower()).strip("-")
+    slug = slug[:40].strip("-") or "event"
+    return f"{prepared_event.start:%Y%m%d-%H%M}-{slug}-{digest[:8]}.ics"
+
+
+def build_ics_text(prepared_event: "PreparedCalendarEvent", uid: str) -> str:
+    now_utc = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Gmail Calendar Agent//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        ics_line("UID", uid),
+        ics_line("DTSTAMP", now_utc),
+        ics_line("DTSTART", format_ics_datetime(prepared_event.start)),
+        ics_line("DTEND", format_ics_datetime(prepared_event.end)),
+        ics_line("SUMMARY", prepared_event.title),
+    ]
+
+    if prepared_event.location:
+        lines.append(ics_line("LOCATION", prepared_event.location))
+    if prepared_event.description:
+        lines.append(ics_line("DESCRIPTION", prepared_event.description))
+
+    lines.extend(["END:VEVENT", "END:VCALENDAR"])
+    folded_lines = [fold_ics_line(line) for line in lines]
+    return "\r\n".join(folded_lines) + "\r\n"
+
+
+def ics_line(name: str, value: str) -> str:
+    return f"{name}:{escape_ics_text(value)}"
+
+
+def format_ics_datetime(value: datetime) -> str:
+    return value.strftime("%Y%m%dT%H%M%S")
+
+
+def escape_ics_text(value: str) -> str:
+    return (
+        clean_calendar_text(value)
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
+
+
+def fold_ics_line(line: str) -> str:
+    chunks = []
+    current = ""
+    current_length = 0
+
+    for character in line:
+        character_length = len(character.encode("utf-8"))
+        limit = 75 if not chunks else 74
+
+        if current and current_length + character_length > limit:
+            chunks.append(current)
+            current = " " + character
+            current_length = 1 + character_length
+        else:
+            current += character
+            current_length += character_length
+
+    if current:
+        chunks.append(current)
+
+    return "\r\n".join(chunks)
 
 
 def run_calendar_command(

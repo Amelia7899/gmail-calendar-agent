@@ -36,5 +36,9 @@ After approval, the app saves `token.json` locally so the next run can reuse the
 - Each Gmail message is normalized with `message_id`, `subject`, `sender`, `date`, and `body`.
 - Extracted events are shown in a preview step with `Confirm` and `Skip` buttons.
 - Confirmed events are added to an Apple Calendar named `Email Agent`.
+- Confirmed or skipped Gmail messages are recorded in `data/processed_emails.json`, so future scans leave them out.
+- If Apple Calendar cannot be written, the app creates an `.ics` fallback file in `ics/`.
 - The first calendar write may ask for macOS Calendar access.
 - If no permission prompt appears, double-click `Calendar Writer Helper/Gmail Calendar Agent Calendar Writer.app`, then open System Settings > Privacy & Security > Calendars and allow `Gmail Calendar Agent Calendar Writer`.
+
+To use an `.ics` fallback, open the generated file from `ics/` and import it into your calendar app.

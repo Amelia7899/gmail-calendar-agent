@@ -7,3 +7,5 @@ token.json
 .gmail_oauth_state.json
 .calendar_writer/
 Calendar Writer Helper/
+data/processed_emails.json
+ics/*.ics
