@@ -73,20 +73,20 @@ def is_message_processed(
 def filter_unprocessed_emails(
     emails: list[dict[str, str]],
     memory_path: Path | str = DEFAULT_MEMORY_PATH,
-) -> tuple[list[dict[str, str]], int]:
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     processed_ids = load_processed_message_ids(memory_path)
     unprocessed_emails = []
-    skipped_count = 0
+    skipped_emails = []
 
     for email in emails:
         message_id = normalize_message_id(email.get("message_id"))
         if message_id and message_id in processed_ids:
-            skipped_count += 1
+            skipped_emails.append(email)
             continue
 
         unprocessed_emails.append(email)
 
-    return unprocessed_emails, skipped_count
+    return unprocessed_emails, skipped_emails
 
 
 def normalize_message_id(message_id: object) -> str:

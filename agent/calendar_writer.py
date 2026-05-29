@@ -14,6 +14,7 @@ import tempfile
 
 DEFAULT_CALENDAR_NAME = "Email Agent"
 DEFAULT_EVENT_DURATION = timedelta(hours=1)
+FORCE_CALENDAR_WRITE_FAILURE_ENV = "FORCE_CALENDAR_WRITE_FAILURE"
 NEEDS_REVIEW = "Needs review"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "ics"
@@ -110,6 +111,10 @@ def write_event_to_calendar(
     """Create one event in Apple Calendar and return the created event details."""
 
     prepared_event = prepare_calendar_event(event, calendar_name)
+
+    if os.environ.get(FORCE_CALENDAR_WRITE_FAILURE_ENV) == "1":
+        raise CalendarWriterError("Forced Apple Calendar write failure for testing.")
+
     osascript_path = shutil.which("osascript")
 
     if sys.platform != "darwin" or not osascript_path:

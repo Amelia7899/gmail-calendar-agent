@@ -169,6 +169,7 @@ def gmail_message_to_email(message: dict[str, Any]) -> dict[str, str]:
         "id": message_id,
         "message_id": message_id,
         "thread_id": message.get("threadId", ""),
+        "internal_date": message.get("internalDate", ""),
         "subject": subject,
         "sender": sender,
         "date": sent_date,

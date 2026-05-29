@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 import html
 import json
 import os
 import re
 from urllib import error, request
+from zoneinfo import ZoneInfo
 
 
 EVENT_KEYWORDS = (
@@ -159,6 +161,7 @@ def is_event_related(text: str) -> bool:
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+LOCAL_TIMEZONE = ZoneInfo("Pacific/Auckland")
 LAST_EXTRACTION_STATUS = {
     "engine": "Rules",
     "message": "Rule-based extraction is active.",
@@ -188,23 +191,27 @@ def extract_events_from_email(email: dict[str, str]) -> list[dict[str, str]]:
     subject = email.get("subject", "No subject").strip() or "No subject"
     body = email.get("body", "").strip()
     text = normalize_text(f"{subject}\n{body}")
+    reference_date = email_reference_date(email)
+
+    if is_non_actionable_inspection_notice(text):
+        return []
 
     if not is_event_related(text):
         return []
 
-    canvas_events = extract_canvas_assignment_events(email, text)
+    canvas_events = extract_canvas_assignment_events(email, text, reference_date)
     if canvas_events:
         return canvas_events
 
-    labeled_events = extract_labeled_events(email, text)
+    labeled_events = extract_labeled_events(email, text, reference_date)
     if labeled_events:
         return labeled_events
 
-    schedule_events = extract_schedule_events(email, text)
+    schedule_events = extract_schedule_events(email, text, reference_date)
     if schedule_events:
         return schedule_events
 
-    event = build_single_event(email, subject, body, text)
+    event = build_single_event(email, subject, body, text, reference_date)
     return [event] if is_meaningful_event(event) else []
 
 
@@ -224,6 +231,27 @@ def get_extractor_status() -> dict[str, str]:
 def set_extractor_status(engine: str, message: str) -> None:
     LAST_EXTRACTION_STATUS["engine"] = engine
     LAST_EXTRACTION_STATUS["message"] = message
+
+
+def email_reference_date(email: dict[str, str]) -> date:
+    internal_date = str(email.get("internal_date", "")).strip()
+    if internal_date.isdigit():
+        timestamp = int(internal_date) / 1000
+        return datetime.fromtimestamp(timestamp, LOCAL_TIMEZONE).date()
+
+    sent_date = str(email.get("date", "")).strip()
+    if sent_date and sent_date.lower() != "unknown date":
+        try:
+            parsed_date = parsedate_to_datetime(sent_date)
+        except (TypeError, ValueError):
+            parsed_date = None
+
+        if parsed_date:
+            if parsed_date.tzinfo:
+                parsed_date = parsed_date.astimezone(LOCAL_TIMEZONE)
+            return parsed_date.date()
+
+    return date.today()
 
 
 def extract_events_with_llm_if_available(
@@ -248,6 +276,7 @@ def extract_events_from_email_with_llm(
     subject = email.get("subject", "No subject").strip() or "No subject"
     sender = email.get("sender", "Unknown sender")
     sent_date = email.get("date", "Unknown date")
+    reference_date = email_reference_date(email)
     body = normalize_text(email.get("body", ""))
     source_email = email.get("source", email.get("id", "email"))
     model = os.getenv("OPENAI_MODEL", DEFAULT_OPENAI_MODEL)
@@ -259,7 +288,7 @@ def extract_events_from_email_with_llm(
             {
                 "role": "user",
                 "content": (
-                    f"Current date: {date.today().isoformat()}\n"
+                    f"Reference date from email received time: {reference_date.isoformat()}\n"
                     f"Email subject: {subject}\n"
                     f"Sender: {sender}\n"
                     f"Email sent date: {sent_date}\n"
@@ -344,9 +373,11 @@ def build_llm_system_prompt() -> str:
         "questions, footers, preferences links, or general announcements without a "
         "concrete scheduled date. If one email lists multiple Date/Time/Where blocks, "
         "return one event per block. If one date/time has multiple rooms or venues, "
-        "return one event per room or venue. Dates must be YYYY-MM-DD. Times must be "
-        "24-hour HH:MM or HH:MM-HH:MM. Use exactly 'Needs review' for missing time or "
-        "location. Clean Markdown, links, emoji-only fragments, and HTML tags from names."
+        "return one event per room or venue. Dates must be YYYY-MM-DD. Infer missing "
+        "years and relative dates from the email reference date, not today's scan date. "
+        "Times must be 24-hour HH:MM or HH:MM-HH:MM. Use exactly 'Needs review' for "
+        "missing time or location. Clean Markdown, links, emoji-only fragments, and HTML "
+        "tags from names."
     )
 
 
@@ -453,10 +484,11 @@ def build_single_event(
     subject: str,
     body: str,
     text: str,
+    reference_date: date,
 ) -> dict[str, str]:
     return {
         "title": clean_title(subject),
-        "date": extract_date(text),
+        "date": extract_date(text, reference_date),
         "time": extract_time(text),
         "location": extract_location(text),
         "description": build_description(body),
@@ -465,7 +497,11 @@ def build_single_event(
     }
 
 
-def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+def extract_canvas_assignment_events(
+    email: dict[str, str],
+    text: str,
+    reference_date: date,
+) -> list[dict[str, str]]:
     source_email = email.get("source", email.get("id", "sample email"))
     source_message_id = email.get("message_id", "")
     events = []
@@ -481,7 +517,7 @@ def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[d
 
         event = {
             "title": title,
-            "date": extract_date(due_text),
+            "date": extract_date(due_text, reference_date),
             "time": extract_time(due_text),
             "location": "Needs review",
             "description": description,
@@ -495,7 +531,11 @@ def extract_canvas_assignment_events(email: dict[str, str], text: str) -> list[d
     return events
 
 
-def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+def extract_schedule_events(
+    email: dict[str, str],
+    text: str,
+    reference_date: date,
+) -> list[dict[str, str]]:
     headers = list(SCHEDULE_HEADER_PATTERN.finditer(text))
     if not headers:
         return []
@@ -512,7 +552,7 @@ def extract_schedule_events(email: dict[str, str], text: str) -> list[dict[str, 
             header.group("day"),
             header.group("month"),
             header.groupdict().get("year"),
-            date.today(),
+            reference_date,
         )
         event_time = normalize_time_expression(header.group("time")) or "Needs review"
         room_locations = extract_room_locations(section)
@@ -558,7 +598,11 @@ def extract_room_locations(section: str) -> list[tuple[str, str]]:
     return room_locations
 
 
-def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, str]]:
+def extract_labeled_events(
+    email: dict[str, str],
+    text: str,
+    reference_date: date,
+) -> list[dict[str, str]]:
     date_matches = list(DATE_LABEL_PATTERN.finditer(text))
     if not date_matches:
         return []
@@ -586,7 +630,7 @@ def extract_labeled_events(email: dict[str, str], text: str) -> list[dict[str, s
         location, next_prefix = split_location_and_next_prefix(raw_location)
 
         title = infer_title_from_prefix(pending_prefix, subject)
-        event_date = parse_date_text(date_text)
+        event_date = parse_date_text(date_text, reference_date)
         event_time = normalize_time_expression(time_text) or "Needs review"
         description = clean_value(strip_html(pending_prefix)) or subject
 
@@ -656,8 +700,8 @@ def split_location_and_next_prefix(raw_location: str) -> tuple[str | None, str]:
     return clean_location_candidate(value), link_tail
 
 
-def parse_date_text(value: str) -> str | None:
-    return parse_explicit_date(clean_value(value), date.today())
+def parse_date_text(value: str, reference_date: date) -> str | None:
+    return parse_explicit_date(clean_value(value), reference_date)
 
 
 def infer_title_from_prefix(prefix: str, fallback_title: str) -> str:
@@ -735,10 +779,9 @@ def shorten_before_description_verb(text: str) -> str:
 def extract_date(text: str, today: date | None = None) -> str:
     today = today or date.today()
 
-    for unit in ranked_text_units(text):
-        parsed_date = parse_explicit_date(unit, today)
-        if parsed_date:
-            return parsed_date
+    parsed_date = parse_best_explicit_date(text, today)
+    if parsed_date:
+        return parsed_date
 
     for unit in ranked_text_units(text):
         parsed_date = parse_relative_date(unit, today)
@@ -988,21 +1031,86 @@ def split_text_units(text: str) -> list[str]:
 
 
 def parse_explicit_date(text: str, today: date) -> str | None:
-    for pattern in DATE_EXTRACTORS:
-        match = pattern.search(text)
-        if not match:
+    matches = explicit_date_matches(text)
+    if not matches:
+        return None
+
+    return date_from_match(matches[0], today)
+
+
+def parse_best_explicit_date(text: str, today: date) -> str | None:
+    matches = explicit_date_matches(text)
+    if not matches:
+        return None
+
+    scored_dates = []
+
+    for index, match in enumerate(matches):
+        parsed_date = date_from_match(match, today)
+        if not parsed_date:
             continue
 
-        parsed_date = date_from_parts(
-            match.group("day"),
-            match.group("month"),
-            match.groupdict().get("year"),
-            today,
-        )
-        if parsed_date:
-            return parsed_date
+        score = score_date_match(text, match, index, matches)
+        scored_dates.append((score, index, parsed_date))
 
-    return None
+    if not scored_dates:
+        return None
+
+    scored_dates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return scored_dates[0][2]
+
+
+def explicit_date_matches(text: str) -> list[re.Match[str]]:
+    matches = []
+    seen_spans = set()
+
+    for pattern in DATE_EXTRACTORS:
+        for match in pattern.finditer(text):
+            span = match.span()
+            if span in seen_spans:
+                continue
+            seen_spans.add(span)
+            matches.append(match)
+
+    return sorted(matches, key=lambda match: match.start())
+
+
+def date_from_match(match: re.Match[str], today: date) -> str | None:
+    return date_from_parts(
+        match.group("day"),
+        match.group("month"),
+        match.groupdict().get("year"),
+        today,
+    )
+
+
+def score_date_match(
+    text: str,
+    match: re.Match[str],
+    index: int,
+    matches: list[re.Match[str]],
+) -> int:
+    previous_end = matches[index - 1].end() if index > 0 else 0
+    next_start = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+    before = text[max(previous_end, match.start() - 140) : match.start()]
+    after = text[match.end() : min(next_start, match.end() + 180)]
+    local = f"{before} {match.group(0)} {after}"
+    local_lower = local.lower()
+    score = 0
+
+    if normalize_time_expression(after) or normalize_time_expression(local):
+        score += 8
+    if re.search(r"\b(?:between|at|from|until)\b", after, re.IGNORECASE):
+        score += 2
+    if re.search(
+        r"\b(?:re-?inspection date|due date|deadline|appointment|session|event|meeting|exam)\b",
+        local_lower,
+    ):
+        score += 4
+    if re.search(r"\b(?:completed|was completed|were completed|has completed)\b", local_lower):
+        score -= 6
+
+    return score
 
 
 def parse_relative_date(text: str, today: date) -> str | None:
@@ -1079,6 +1187,15 @@ def safe_date(year: int, month: int, day: int) -> date | None:
 
 def is_meaningful_event(event: dict[str, str]) -> bool:
     return event.get("date") != "Needs review" or event.get("time") != "Needs review"
+
+
+def is_non_actionable_inspection_notice(text: str) -> bool:
+    lower_text = text.lower()
+    if "inspection comments" not in lower_text:
+        return False
+
+    specific_result = re.split(r"\bif you have failed\b", lower_text, maxsplit=1)[0]
+    return re.search(r"\bpass\b\s*-\s*no further action required\b", specific_result) is not None
 
 
 def has_date_language(text: str) -> bool:

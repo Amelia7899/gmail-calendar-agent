@@ -24,7 +24,6 @@ from agent.gmail_reader import (
 )
 from agent.memory import filter_unprocessed_emails, mark_message_processed
 
-
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_EMAIL_DIR = BASE_DIR / "data" / "sample_emails"
 GMAIL_REDIRECT_URI = "http://localhost:8501/"
@@ -80,6 +79,9 @@ def reset_stale_extraction_state() -> None:
         "last_scan_event_count",
         "last_extractor_status",
         "last_scan_skipped_processed_count",
+        "last_scan_skipped_processed_emails",
+        "gmail_scanned_emails",
+        "gmail_processed_emails",
     ):
         st.session_state.pop(key, None)
 
@@ -92,6 +94,7 @@ def scan_emails(
     source_label: str,
     use_llm: bool,
     skipped_processed_count: int = 0,
+    skipped_processed_emails: list[dict[str, str]] | None = None,
 ) -> None:
     schedule_items = extract_events_from_emails(emails, use_llm=use_llm)
     st.session_state["schedule_items"] = schedule_items
@@ -102,6 +105,7 @@ def scan_emails(
     st.session_state["last_scan_event_count"] = len(schedule_items)
     st.session_state["last_extractor_status"] = get_extractor_status()
     st.session_state["last_scan_skipped_processed_count"] = skipped_processed_count
+    st.session_state["last_scan_skipped_processed_emails"] = skipped_processed_emails or []
 
 
 def mark_event(index: int, decision: str) -> None:
@@ -138,7 +142,7 @@ def confirm_event(index: int) -> None:
     event = schedule_items[index]
 
     try:
-        result = write_event_to_calendar(event)
+        ics_result = write_event_to_ics(event)
     except CalendarEventValidationError as exc:
         decisions[index] = "pending"
         calendar_results[index] = {
@@ -146,40 +150,37 @@ def confirm_event(index: int) -> None:
             "message": str(exc),
         }
     except CalendarWriterError as exc:
+        decisions[index] = "pending"
+        calendar_results[index] = {
+            "status": "error",
+            "message": f"ICS file could not be created: {exc}",
+        }
+    else:
         try:
-            ics_result = write_event_to_ics(event)
-        except CalendarWriterError as ics_exc:
-            decisions[index] = "pending"
-            calendar_results[index] = {
-                "status": "error",
-                "message": (
-                    f"Apple Calendar sync failed: {exc} "
-                    f"ICS fallback also failed: {ics_exc}"
-                ),
-            }
-        else:
+            result = write_event_to_calendar(event)
+        except CalendarWriterError as exc:
             decisions[index] = "confirmed"
             calendar_results[index] = {
                 "status": "ics",
-                "message": (
-                    "Apple Calendar sync failed, so an ICS file was created instead."
-                ),
+                "message": f"ICS file created. Apple Calendar sync failed: {exc}",
                 "path": str(ics_result.path),
                 "uid": ics_result.uid,
                 "start": ics_result.start.strftime("%Y-%m-%d %H:%M"),
                 "end": ics_result.end.strftime("%Y-%m-%d %H:%M"),
             }
             mark_message_processed(event.get("message_id"))
-    else:
-        decisions[index] = "confirmed"
-        calendar_results[index] = {
-            "status": "created",
-            "message": "Added to Apple Calendar in Email Agent.",
-            "uid": result.uid,
-            "start": result.start.strftime("%Y-%m-%d %H:%M"),
-            "end": result.end.strftime("%Y-%m-%d %H:%M"),
-        }
-        mark_message_processed(event.get("message_id"))
+        else:
+            decisions[index] = "confirmed"
+            calendar_results[index] = {
+                "status": "created",
+                "message": "Added to Apple Calendar in Email Agent. ICS file created.",
+                "path": str(ics_result.path),
+                "uid": result.uid,
+                "ics_uid": ics_result.uid,
+                "start": result.start.strftime("%Y-%m-%d %H:%M"),
+                "end": result.end.strftime("%Y-%m-%d %H:%M"),
+            }
+            mark_message_processed(event.get("message_id"))
 
     st.session_state["event_decisions"] = decisions
     st.session_state["calendar_results"] = calendar_results
@@ -222,10 +223,11 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
             if calendar_result.get("status") == "created":
                 st.success(calendar_result.get("message", "Added to Apple Calendar."))
             elif calendar_result.get("status") == "ics":
-                st.warning(calendar_result.get("message", "Created an ICS fallback file."))
-                st.caption(calendar_result.get("path", ""))
+                st.warning(calendar_result.get("message", "Created an ICS file."))
             else:
                 st.error(calendar_result.get("message", "Apple Calendar sync failed."))
+            if calendar_result.get("path"):
+                st.caption(calendar_result["path"])
 
         confirm_col, skip_col, _ = st.columns([1, 1, 4])
         if confirm_col.button(
@@ -234,7 +236,7 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
             type="primary",
             disabled=decision == "confirmed",
         ):
-            with st.spinner("Adding to Apple Calendar..."):
+            with st.spinner("Confirming event..."):
                 confirm_event(index)
             st.rerun()
 
@@ -245,6 +247,29 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
         ):
             mark_event(index, "skipped")
             st.rerun()
+
+
+def show_email_expanders(emails: list[dict[str, str]]) -> None:
+    for email in emails:
+        with st.expander(email.get("subject", "No subject")):
+            st.caption(
+                f"{email.get('sender', 'Unknown sender')} | "
+                f"{email.get('date', 'Unknown date')} | "
+                f"ID: {email.get('message_id', '')}"
+            )
+            st.write(email.get("body", ""))
+
+
+def email_summary_rows(emails: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "Subject": email.get("subject", "No subject"),
+            "Sender": email.get("sender", "Unknown sender"),
+            "Date": email.get("date", "Unknown date"),
+            "ID": email.get("message_id", ""),
+        }
+        for email in emails
+    ]
 
 
 def build_current_url() -> str:
@@ -377,39 +402,33 @@ else:
             with st.spinner("Reading recent Gmail messages..."):
                 raw_gmail_emails = read_recent_emails(max_results=max_results)
 
-            gmail_emails, skipped_processed_count = filter_unprocessed_emails(
+            gmail_emails, skipped_processed_emails = filter_unprocessed_emails(
                 raw_gmail_emails
             )
+            skipped_processed_count = len(skipped_processed_emails)
 
+            st.session_state["gmail_scanned_emails"] = raw_gmail_emails
             st.session_state["gmail_emails"] = gmail_emails
+            st.session_state["gmail_processed_emails"] = skipped_processed_emails
             st.session_state["gmail_processed_skip_count"] = skipped_processed_count
             scan_emails(
                 gmail_emails,
                 "Gmail",
                 use_llm,
                 skipped_processed_count=skipped_processed_count,
+                skipped_processed_emails=skipped_processed_emails,
             )
             st.rerun()
         except GmailReaderError as exc:
             st.error(str(exc))
 
-    gmail_emails = st.session_state.get("gmail_emails", [])
-    gmail_processed_skip_count = st.session_state.get("gmail_processed_skip_count", 0)
-
-    if gmail_processed_skip_count:
-        st.info(
-            f"Skipped {gmail_processed_skip_count} already processed Gmail message(s)."
-        )
+    gmail_emails = st.session_state.get(
+        "gmail_scanned_emails",
+        st.session_state.get("gmail_emails", []),
+    )
 
     if gmail_emails:
-        for email in gmail_emails:
-            with st.expander(email["subject"]):
-                st.caption(
-                    f"{email.get('sender', 'Unknown sender')} | "
-                    f"{email.get('date', 'Unknown date')} | "
-                    f"ID: {email.get('message_id', '')}"
-                )
-                st.write(email.get("body", ""))
+        show_email_expanders(gmail_emails)
     else:
         st.write("Connect Gmail to show recent messages here.")
 
@@ -430,11 +449,14 @@ if last_scan_event_count is not None:
     scan_engine = extractor_status.get("engine", "Rules")
     email_count = st.session_state.get("last_scan_email_count", 0)
     skipped_processed_count = st.session_state.get("last_scan_skipped_processed_count", 0)
+    skipped_processed_emails = st.session_state.get("last_scan_skipped_processed_emails", [])
     st.caption(extractor_status.get("message", ""))
     if skipped_processed_count:
         st.info(
             f"{skipped_processed_count} already processed Gmail message(s) were left out."
         )
+        with st.expander("Already processed Gmail messages"):
+            st.dataframe(email_summary_rows(skipped_processed_emails), width="stretch", hide_index=True)
     if last_scan_event_count:
         st.success(
             f"{scan_engine} extracted {last_scan_event_count} event(s) "
