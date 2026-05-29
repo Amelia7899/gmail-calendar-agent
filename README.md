@@ -155,9 +155,9 @@ Click `Create Gmail login link` again and restart the Google login flow.
 
 The app scans recent inbox messages only. Increase the slider up to 20 messages, or test the extraction flow with sample emails first.
 
-**Calendar says a date or time needs review**
+**Calendar says a date needs review**
 
-The extracted event is missing a concrete date or time. The app blocks Calendar writes for incomplete events so you can avoid creating bad calendar items.
+The extracted event is missing a concrete date. If the event has a date but no time, the app creates it as an all-day event.
 
 **Calendar permission did not show up**
 

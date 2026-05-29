@@ -375,9 +375,10 @@ def build_llm_system_prompt() -> str:
         "return one event per block. If one date/time has multiple rooms or venues, "
         "return one event per room or venue. Dates must be YYYY-MM-DD. Infer missing "
         "years and relative dates from the email reference date, not today's scan date. "
-        "Times must be 24-hour HH:MM or HH:MM-HH:MM. Use exactly 'Needs review' for "
-        "missing time or location. Clean Markdown, links, emoji-only fragments, and HTML "
-        "tags from names."
+        "Times must be 24-hour HH:MM or HH:MM-HH:MM when present. Use exactly "
+        "'Needs review' for missing time or location. Missing time will be written as "
+        "an all-day event. Clean Markdown, links, emoji-only fragments, and HTML tags "
+        "from names."
     )
 
 
@@ -473,7 +474,6 @@ def has_concrete_schedule(events: list[dict[str, str]]) -> bool:
 
     return all(
         event.get("date") != "Needs review"
-        and event.get("time") != "Needs review"
         and event.get("location") != "Needs review"
         for event in events
     )
@@ -618,14 +618,14 @@ def extract_labeled_events(
             date_matches[index + 1].start() if index + 1 < len(date_matches) else len(text)
         )
         time_match = TIME_LABEL_PATTERN.search(text, date_match.end(), next_date_start)
-        if not time_match:
-            continue
-        where_match = WHERE_LABEL_PATTERN.search(text, time_match.end(), next_date_start)
+        where_start = time_match.end() if time_match else date_match.end()
+        where_match = WHERE_LABEL_PATTERN.search(text, where_start, next_date_start)
         if not where_match:
             continue
 
-        date_text = text[date_match.end() : time_match.start()]
-        time_text = text[time_match.end() : where_match.start()]
+        date_text_end = time_match.start() if time_match else where_match.start()
+        date_text = text[date_match.end() : date_text_end]
+        time_text = text[time_match.end() : where_match.start()] if time_match else ""
         raw_location = text[where_match.end() : next_date_start]
         location, next_prefix = split_location_and_next_prefix(raw_location)
 

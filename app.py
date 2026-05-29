@@ -27,12 +27,40 @@ from agent.memory import filter_unprocessed_emails, mark_message_processed
 BASE_DIR = Path(__file__).resolve().parent
 SAMPLE_EMAIL_DIR = BASE_DIR / "data" / "sample_emails"
 GMAIL_REDIRECT_URI = "http://localhost:8501/"
-EXTRACTOR_STATE_VERSION = "2026-05-26-time-location-v3"
+EXTRACTOR_STATE_VERSION = "2026-05-29-all-day-time-v1"
 DECISION_LABELS = {
     "pending": "Pending review",
     "confirmed": "Confirmed",
     "skipped": "Skipped",
 }
+
+
+def needs_review(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {
+        "",
+        "needs review",
+        "tba",
+        "tbd",
+        "to be announced",
+        "to be confirmed",
+        "n/a",
+        "none",
+        "待定",
+        "未定",
+    }
+
+
+def display_event_time(event: dict[str, str]) -> str:
+    if not needs_review(event.get("date")) and needs_review(event.get("time")):
+        return "All day"
+    return str(event.get("time", "Needs review")).strip() or "Needs review"
+
+
+def display_result_time(start, all_day: bool) -> str:
+    if all_day:
+        return start.strftime("%Y-%m-%d")
+    return start.strftime("%Y-%m-%d %H:%M")
 
 
 def read_sample_emails() -> list[dict[str, str]]:
@@ -116,9 +144,6 @@ def mark_event(index: int, decision: str) -> None:
         decisions[index] = decision
         st.session_state["event_decisions"] = decisions
 
-    if decision == "skipped" and index < len(schedule_items):
-        mark_message_processed(schedule_items[index].get("message_id"))
-
     if decision == "skipped":
         calendar_results = st.session_state.get("calendar_results", [])
         if index < len(calendar_results):
@@ -165,8 +190,9 @@ def confirm_event(index: int) -> None:
                 "message": f"ICS file created. Apple Calendar sync failed: {exc}",
                 "path": str(ics_result.path),
                 "uid": ics_result.uid,
-                "start": ics_result.start.strftime("%Y-%m-%d %H:%M"),
-                "end": ics_result.end.strftime("%Y-%m-%d %H:%M"),
+                "start": display_result_time(ics_result.start, ics_result.all_day),
+                "end": display_result_time(ics_result.end, ics_result.all_day),
+                "all_day": ics_result.all_day,
             }
             mark_message_processed(event.get("message_id"))
         else:
@@ -177,8 +203,9 @@ def confirm_event(index: int) -> None:
                 "path": str(ics_result.path),
                 "uid": result.uid,
                 "ics_uid": ics_result.uid,
-                "start": result.start.strftime("%Y-%m-%d %H:%M"),
-                "end": result.end.strftime("%Y-%m-%d %H:%M"),
+                "start": display_result_time(result.start, result.all_day),
+                "end": display_result_time(result.end, result.all_day),
+                "all_day": result.all_day,
             }
             mark_message_processed(event.get("message_id"))
 
@@ -208,7 +235,7 @@ def preview_event(event: dict[str, str], index: int, decision: str) -> None:
         date_col.caption("Date")
         date_col.write(event.get("date", "Needs review"))
         time_col.caption("Time")
-        time_col.write(event.get("time", "Needs review"))
+        time_col.write(display_event_time(event))
         location_col.caption("Location")
         location_col.write(event.get("location", "Needs review"))
         source_col.caption("Source email")

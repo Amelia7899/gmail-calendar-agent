@@ -158,9 +158,9 @@ int main(int argc, const char *argv[]) {
             firstEventArg = 3;
         }
 
-        if (argc - firstEventArg != 8) {
+        if (argc - firstEventArg != 9) {
             return FinishWithError(
-                @"Expected 8 arguments: title start_date start_time end_date end_time location description calendar_name.",
+                @"Expected 9 arguments: title start_date start_time end_date end_time location description calendar_name all_day.",
                 resultPath,
                 64
             );
@@ -174,6 +174,7 @@ int main(int argc, const char *argv[]) {
         NSString *location = ArgumentAt(argc, argv, firstEventArg + 5);
         NSString *notes = ArgumentAt(argc, argv, firstEventArg + 6);
         NSString *calendarName = ArgumentAt(argc, argv, firstEventArg + 7);
+        BOOL allDay = [ArgumentAt(argc, argv, firstEventArg + 8) isEqualToString:@"1"];
 
         NSDate *startDate = ParseCalendarDate(startDateText, startTimeText);
         NSDate *endDate = ParseCalendarDate(endDateText, endTimeText);
@@ -198,6 +199,7 @@ int main(int argc, const char *argv[]) {
         event.endDate = endDate;
         event.location = location;
         event.notes = notes;
+        event.allDay = allDay;
         event.calendar = calendar;
 
         NSError *error = nil;

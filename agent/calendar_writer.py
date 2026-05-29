@@ -57,7 +57,8 @@ on run argv
     set theLocation to item 6 of argv
     set theDescription to item 7 of argv
     set theCalendarName to item 8 of argv
-    set calendarAppPath to item 9 of argv
+    set isAllDay to (item 9 of argv) is "1"
+    set calendarAppPath to item 10 of argv
 
     set startAt to my buildCalendarDate(startDateText, startTimeText)
     set endAt to my buildCalendarDate(endDateText, endTimeText)
@@ -70,7 +71,7 @@ on run argv
             set targetCalendar to item 1 of matchingCalendars
         end if
 
-        set createdEvent to make new event at end of events of targetCalendar with properties {summary:theTitle, start date:startAt, end date:endAt, location:theLocation, description:theDescription}
+        set createdEvent to make new event at end of events of targetCalendar with properties {summary:theTitle, start date:startAt, end date:endAt, location:theLocation, description:theDescription, allday event:isAllDay}
         return uid of createdEvent
     end tell
 end run
@@ -93,6 +94,7 @@ class CalendarWriteResult:
     title: str
     start: datetime
     end: datetime
+    all_day: bool
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,7 @@ class IcsWriteResult:
     title: str
     start: datetime
     end: datetime
+    all_day: bool
 
 
 def write_event_to_calendar(
@@ -134,6 +137,7 @@ def write_event_to_calendar(
         prepared_event.location,
         prepared_event.description,
         prepared_event.calendar_name,
+        "1" if prepared_event.all_day else "0",
         calendar_app_path,
     ]
 
@@ -156,6 +160,7 @@ def write_event_to_calendar(
         title=prepared_event.title,
         start=prepared_event.start,
         end=prepared_event.end,
+        all_day=prepared_event.all_day,
     )
 
 
@@ -180,6 +185,7 @@ def write_event_to_ics(
         title=prepared_event.title,
         start=prepared_event.start,
         end=prepared_event.end,
+        all_day=prepared_event.all_day,
     )
 
 
@@ -193,6 +199,7 @@ def build_event_digest(
             prepared_event.title,
             prepared_event.start.isoformat(),
             prepared_event.end.isoformat(),
+            "all-day" if prepared_event.all_day else "timed",
             prepared_event.location,
         ]
     )
@@ -202,6 +209,8 @@ def build_event_digest(
 def build_ics_filename(prepared_event: "PreparedCalendarEvent", digest: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", prepared_event.title.lower()).strip("-")
     slug = slug[:40].strip("-") or "event"
+    if prepared_event.all_day:
+        return f"{prepared_event.start:%Y%m%d}-all-day-{slug}-{digest[:8]}.ics"
     return f"{prepared_event.start:%Y%m%d-%H%M}-{slug}-{digest[:8]}.ics"
 
 
@@ -216,10 +225,16 @@ def build_ics_text(prepared_event: "PreparedCalendarEvent", uid: str) -> str:
         "BEGIN:VEVENT",
         ics_line("UID", uid),
         ics_line("DTSTAMP", now_utc),
-        ics_line("DTSTART", format_ics_datetime(prepared_event.start)),
-        ics_line("DTEND", format_ics_datetime(prepared_event.end)),
-        ics_line("SUMMARY", prepared_event.title),
     ]
+
+    if prepared_event.all_day:
+        lines.append(ics_line("DTSTART;VALUE=DATE", format_ics_date(prepared_event.start.date())))
+        lines.append(ics_line("DTEND;VALUE=DATE", format_ics_date(prepared_event.end.date())))
+    else:
+        lines.append(ics_line("DTSTART", format_ics_datetime(prepared_event.start)))
+        lines.append(ics_line("DTEND", format_ics_datetime(prepared_event.end)))
+
+    lines.append(ics_line("SUMMARY", prepared_event.title))
 
     if prepared_event.location:
         lines.append(ics_line("LOCATION", prepared_event.location))
@@ -237,6 +252,10 @@ def ics_line(name: str, value: str) -> str:
 
 def format_ics_datetime(value: datetime) -> str:
     return value.strftime("%Y%m%dT%H%M%S")
+
+
+def format_ics_date(value: date) -> str:
+    return value.strftime("%Y%m%d")
 
 
 def escape_ics_text(value: str) -> str:
@@ -303,6 +322,7 @@ def write_event_with_eventkit(prepared_event: PreparedCalendarEvent) -> Calendar
         prepared_event.location,
         prepared_event.description,
         prepared_event.calendar_name,
+        "1" if prepared_event.all_day else "0",
     ]
 
     if open_path:
@@ -373,6 +393,7 @@ def eventkit_result_to_calendar_result(
             title=prepared_event.title,
             start=prepared_event.start,
             end=prepared_event.end,
+            all_day=prepared_event.all_day,
         )
 
     if result_text.startswith("ERROR\n"):
@@ -477,6 +498,7 @@ class PreparedCalendarEvent:
     title: str
     start: datetime
     end: datetime
+    all_day: bool
     location: str
     description: str
     calendar_name: str
@@ -487,12 +509,15 @@ def prepare_calendar_event(
     calendar_name: str = DEFAULT_CALENDAR_NAME,
 ) -> PreparedCalendarEvent:
     event_date = parse_event_date(event.get("date", ""))
-    start_time, end_time = parse_event_time(event.get("time", ""))
+    start_time, end_time, all_day = parse_event_time(event.get("time", ""))
 
     start = datetime.combine(event_date, start_time)
-    end = datetime.combine(event_date, end_time)
+    if all_day:
+        end = start + timedelta(days=1)
+    else:
+        end = datetime.combine(event_date, end_time)
 
-    if end <= start:
+    if not all_day and end <= start:
         end += timedelta(days=1)
 
     title = clean_calendar_text(event.get("title")) or "Email event"
@@ -503,6 +528,7 @@ def prepare_calendar_event(
         title=title,
         start=start,
         end=end,
+        all_day=all_day,
         location=location,
         description=description,
         calendar_name=calendar_name,
@@ -523,22 +549,43 @@ def parse_event_date(value: str | None) -> date:
         ) from exc
 
 
-def parse_event_time(value: str | None) -> tuple[time, time]:
+def parse_event_time(value: str | None) -> tuple[time, time, bool]:
     value = clean_calendar_text(value)
 
-    if not value or value == NEEDS_REVIEW:
-        raise CalendarEventValidationError("Add a time before sending this event to Calendar.")
+    if is_all_day_time(value):
+        return time.min, time.min, True
 
     range_match = TIME_RANGE_PATTERN.match(value)
     if range_match:
         return (
             parse_time_value(range_match.group("start")),
             parse_time_value(range_match.group("end")),
+            False,
         )
 
     start = parse_time_value(value)
     end_datetime = datetime.combine(date.today(), start) + DEFAULT_EVENT_DURATION
-    return start, end_datetime.time()
+    return start, end_datetime.time(), False
+
+
+def is_all_day_time(value: str) -> bool:
+    normalized = clean_calendar_text(value).lower()
+    return normalized in {
+        "",
+        NEEDS_REVIEW.lower(),
+        "all day",
+        "all-day",
+        "allday",
+        "tba",
+        "tbd",
+        "to be announced",
+        "to be confirmed",
+        "n/a",
+        "none",
+        "全天",
+        "待定",
+        "未定",
+    }
 
 
 def parse_time_value(value: str) -> time:
