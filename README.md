@@ -4,6 +4,10 @@ A Streamlit prototype that scans email, finds likely calendar events, creates `.
 
 The app is intentionally review-first: extracted events are shown in a preview table, and nothing is created until you click `Confirm`.
 
+## Demo Video
+
+[Watch the 2-minute demo video](https://youtube.com/shorts/LRAsF-BXy_s?feature=share)
+
 ## What it does
 
 - Reads sample emails from `data/sample_emails/` or recent Gmail inbox messages.
